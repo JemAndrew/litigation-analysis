@@ -1,0 +1,189 @@
+# ============================================================================
+# LITIGATION ANALYSIS - .gitignore
+# Excludes confidential data, API keys, and large files
+# ============================================================================
+
+# ============================================================================
+# CRITICAL: CONFIDENTIAL DATA - NEVER COMMIT
+# ============================================================================
+
+# All case directories (contains confidential legal documents)
+cases/
+Cases/
+case_data/
+
+# Test data
+test_vector_store_data/
+test_data/
+test_cases/
+
+# Any documents folder
+documents/
+Documents/
+disclosure/
+Disclosure/
+
+# Analysis outputs (may contain confidential findings)
+analysis/
+Analysis/
+outputs/
+Outputs/
+results/
+Results/
+
+# ============================================================================
+# API KEYS & CREDENTIALS - NEVER COMMIT
+# ============================================================================
+
+.env
+.env.*
+.env.local
+.env.production
+*.key
+*.pem
+api_keys.txt
+credentials.json
+secrets.json
+
+# ============================================================================
+# PYTHON
+# ============================================================================
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+.virtualenv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+*.pyo
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+*.egg
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# ============================================================================
+# VECTOR STORES & DATABASES - TOO LARGE FOR GIT
+# ============================================================================
+
+# ChromaDB vector stores
+vector_store/
+Vector_Store/
+*.sqlite3
+*.sqlite
+*.db
+chroma.sqlite3
+
+# Embeddings cache
+embeddings_cache/
+.embeddings/
+
+# Large model files
+*.bin
+*.safetensors
+*.onnx
+*.pt
+*.pth
+
+# HuggingFace cache (Legal-BERT models)
+.cache/
+models/
+transformers_cache/
+
+# ============================================================================
+# IDE & EDITOR FILES
+# ============================================================================
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# PyCharm
+.idea/
+*.iml
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Vim
+*.swp
+*.swo
+*~
+
+# ============================================================================
+# OPERATING SYSTEM
+# ============================================================================
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Linux
+.directory
+
+# ============================================================================
+# LOGS & TEMPORARY FILES
+# ============================================================================
+
+logs/
+*.log
+temp/
+tmp/
+*.tmp
+*.bak
+*.backup
+
+# ============================================================================
+# JUPYTER NOTEBOOKS (if you add them later)
+# ============================================================================
+
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# ============================================================================
+# WHAT TO COMMIT (These ARE safe)
+# ============================================================================
+
+# Core source code:
+# ✅ src/
+# ✅ requirements.txt
+# ✅ README.md
+# ✅ .gitignore
+# ✅ Test scripts (test_*.py)
+# ✅ Configuration templates (config.example.py)
+
+# ============================================================================
+# EXCEPTIONS - Force include these despite wildcards above
+# ============================================================================
+
+# Include empty directories with .gitkeep
+!**/.gitkeep
+
+# Include README files anywhere
+!**/README.md
+
+# Include example/template files
+!*.example
+!*.template
