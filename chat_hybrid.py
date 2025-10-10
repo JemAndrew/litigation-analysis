@@ -14,9 +14,9 @@ from pathlib import Path
 project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root / 'src'))
 
-from core.case_manager import CaseManager
-from intelligence.vector_store import EnhancedVectorStore
-from intelligence.query_engine import QueryEngine, SimpleKnowledgeGraph
+from src.core.case_manager import CaseManager
+from src.intelligence.vector_store import EnhancedVectorStore
+from src.intelligence.query_engine import QueryEngine, SimpleKnowledgeGraph
 
 
 class HybridLitigationChat:

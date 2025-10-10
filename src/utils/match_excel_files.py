@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """
-Match Excel Files - Doc IDs with Descriptions
+Trial Bundle Index - Disclosure ID Generator
+Parses Excel and creates Disclosure IDs in format: {Bundle}_{Tab}
+
 British English throughout
 """
 
@@ -10,138 +12,344 @@ from datetime import datetime
 import re
 
 
-def match_excel_files():
-    """Match List of Documents with Trial Bundle Index"""
+def find_header_row(df: pd.DataFrame) -> int:
+    """Find the actual header row in Excel file"""
+    print("\n🔍 Scanning for header row...")
     
-    print("="*70)
-    print("EXCEL MATCHER")
-    print("="*70)
-    
-    # Paths
-    project_root = Path.cwd()
-    # CORRECT PATHS - Direct to Downloads folder with correct filenames
-    list_file = Path(r"C:\Users\JemAndrew\Downloads\To be discussed\List of Documents Received from PHL on 15.09.25 - Draft 1 - 16.09.25.xlsx")
-    bundle_file = Path(r"C:\Users\JemAndrew\Downloads\To be discussed\Trial Bundle Index - Excel - Draft 2 - 29.09.25.xlsx")
-    
-    # Output location (in your project)
-    project_root = Path(__file__).parent.parent.parent  # Go up from src/utils/ to project root
-    output_dir = project_root / "cases" / "lismore_v_ph" / "analysis" / "folder_69_review"
-    
-    # Check files
-    if not list_file.exists():
-        print(f"\n❌ Not found: {list_file.name}")
-        return
-    
-    if not bundle_file.exists():
-        print(f"\n❌ Not found: {bundle_file.name}")
-        return
-    
-    # Load files
-    print(f"\n📄 Loading files...")
-    df_list = pd.read_excel(list_file)
-    df_bundle = pd.read_excel(bundle_file)
-    
-    print(f"   List of Documents: {len(df_list)} rows")
-    print(f"   Trial Bundle: {len(df_bundle)} rows")
-    
-    print(f"\n   List columns: {list(df_list.columns)}")
-    print(f"   Bundle columns: {list(df_bundle.columns)}")
-    
-    # Find tab column in bundle
-    tab_col = None
-    for col in df_bundle.columns:
-        if 'tab' in str(col).lower() or 'disclosure' in str(col).lower():
-            tab_col = col
-            break
-    
-    if not tab_col:
-        print("\n⚠️  Could not find Tab column")
-        print("Available columns:", list(df_bundle.columns))
-        tab_col = input("Enter tab column name: ").strip()
-    
-    print(f"\n   Using tab column: {tab_col}")
-    
-    # Create Doc IDs
-    print(f"\n🔧 Creating Doc IDs...")
-    df_bundle['Doc_ID'] = None
-    
-    for tab in df_bundle[tab_col].unique():
-        if pd.isna(tab):
-            continue
+    for row_idx in range(min(10, len(df))):
+        row = df.iloc[row_idx]
+        non_empty = row.notna().sum()
+        row_text = ' '.join([str(x).lower() for x in row if pd.notna(x)])
         
-        tab_clean = re.sub(r'[^0-9]', '', str(tab))
-        if not tab_clean:
-            continue
+        header_keywords = ['tab', 'document', 'description', 'name', 'date', 'page', 'disclosure', 'bundle']
+        keyword_matches = sum(1 for kw in header_keywords if kw in row_text)
         
-        tab_mask = df_bundle[tab_col] == tab
-        tab_indices = df_bundle[tab_mask].index
-        
-        for seq_num, idx in enumerate(tab_indices, start=1):
-            doc_id = f"Bundle_Tab_{tab_clean}_{seq_num:03d}"
-            df_bundle.at[idx, 'Doc_ID'] = doc_id
+        if non_empty >= 3 and keyword_matches >= 2:
+            print(f"   ✅ Found headers at row {row_idx}")
+            return row_idx
     
-    created = df_bundle['Doc_ID'].notna().sum()
-    print(f"   ✅ Created {created} Doc IDs")
+    print("   ⚠️  Could not auto-detect header row, using row 0")
+    return 0
+
+
+def load_excel_intelligently(file_path: Path) -> pd.DataFrame:
+    """Load Excel with intelligent header detection"""
+    print(f"\n📄 Loading: {file_path.name}")
     
-    # Find description columns
-    doc_name_col = None
-    date_col = None
+    # Load raw to inspect
+    df_raw = pd.read_excel(file_path, header=None)
+    print(f"   Raw shape: {df_raw.shape[0]} rows × {df_raw.shape[1]} columns")
+    
+    # Find header row
+    header_row = find_header_row(df_raw)
+    
+    # Reload with correct header
+    df = pd.read_excel(file_path, header=header_row, engine='openpyxl')
+    df.columns = [str(col).strip() for col in df.columns]
+    df = df.dropna(how='all')
+    
+    print(f"   ✅ Loaded: {len(df)} rows × {len(df.columns)} columns")
+    print(f"   Columns: {list(df.columns)[:5]}{'...' if len(df.columns) > 5 else ''}")
+    
+    return df
+
+
+def preview_dataframe(df: pd.DataFrame, name: str, n: int = 5):
+    """Show preview of DataFrame"""
+    print(f"\n{'='*70}")
+    print(f"PREVIEW: {name}")
+    print(f"{'='*70}")
+    print(f"Shape: {df.shape[0]} rows × {df.shape[1]} columns")
+    print(f"\nColumns: {list(df.columns)}")
+    print(f"\nFirst {n} rows:")
+    print(df.head(n).to_string())
+    print()
+
+
+def find_column_interactive(df: pd.DataFrame, purpose: str, keywords: list) -> str:
+    """Find column interactively with smart detection"""
+    print(f"\n🔍 Looking for {purpose} column...")
+    
+    # Try exact match first
+    for col in df.columns:
+        col_lower = str(col).lower().strip()
+        if col_lower in keywords:
+            print(f"   ✅ Auto-detected: '{col}' (exact match)")
+            confirm = input(f"   Use this column? (y/n): ").lower()
+            if confirm == 'y':
+                return col
+    
+    # Manual selection
+    print(f"\n   💡 Please select the correct column manually")
+    print(f"\n   Available columns:")
+    
+    for i, col in enumerate(df.columns, 1):
+        sample = df[col].dropna().iloc[0] if len(df[col].dropna()) > 0 else "N/A"
+        print(f"      {i}. {col}")
+        print(f"         Example: {sample}")
+    
+    while True:
+        choice = input(f"\n   Select column number (1-{len(df.columns)}): ").strip()
+        try:
+            idx = int(choice) - 1
+            if 0 <= idx < len(df.columns):
+                selected = df.columns[idx]
+                print(f"   ✅ Selected: '{selected}'")
+                return selected
+            else:
+                print(f"   ❌ Invalid number. Must be 1-{len(df.columns)}")
+        except ValueError:
+            print("   ❌ Invalid input. Enter a number.")
+
+
+def create_disclosure_ids(df: pd.DataFrame, bundle_column: str, tab_column: str) -> pd.DataFrame:
+    """
+    Create Disclosure IDs from Bundle + Tab
+    
+    Format: {BUNDLE}_{TAB}
+    Example: AA_1, AA_1.1, BB_12
+    """
+    print(f"\n🔧 Creating Disclosure IDs")
+    print(f"   Bundle column: '{bundle_column}'")
+    print(f"   Tab column: '{tab_column}'")
+    
+    # Create Disclosure ID by combining Bundle + "_" + Tab
+    df['Disclosure_ID'] = df[bundle_column].astype(str) + "_" + df[tab_column].astype(str)
+    
+    # Clean up any NaN combinations
+    df.loc[df['Disclosure_ID'].str.contains('nan', case=False, na=False), 'Disclosure_ID'] = None
+    
+    created_count = df['Disclosure_ID'].notna().sum()
+    unique_count = df['Disclosure_ID'].nunique()
+    
+    print(f"   ✅ Created {created_count} Disclosure IDs")
+    print(f"   📊 {unique_count} unique IDs")
+    
+    return df
+
+
+def extract_all_columns(df: pd.DataFrame, bundle_column: str, tab_column: str) -> pd.DataFrame:
+    """Extract all relevant columns for output"""
+    print("\n📋 Extracting all columns...")
+    
+    # Find Document Name column
+    doc_name_col = find_column_interactive(
+        df, 
+        "Document Name/Description",
+        ['document name', 'document', 'description', 'name']
+    )
+    
+    # Find Date column
+    date_col = find_column_interactive(
+        df,
+        "Date",
+        ['date', 'dated']
+    )
+    
+    # Optional: Pages column
     pages_col = None
+    if input("\n   Does file have a Pages column? (y/n): ").lower() == 'y':
+        pages_col = find_column_interactive(
+            df,
+            "Pages",
+            ['pages', 'page']
+        )
     
-    for col in df_bundle.columns:
-        col_lower = str(col).lower()
-        if 'document' in col_lower and 'name' in col_lower:
-            doc_name_col = col
-        elif 'date' in col_lower:
-            date_col = col
-        elif 'page' in col_lower:
-            pages_col = col
-    
-    # Create output
+    # Create output DataFrame
     output_data = []
-    for _, row in df_bundle.iterrows():
-        if pd.notna(row.get('Doc_ID')):
+    
+    for _, row in df.iterrows():
+        if pd.notna(row.get('Disclosure_ID')):
             output_data.append({
-                'Doc ID': row['Doc_ID'],
+                'Disclosure ID': row['Disclosure_ID'],
+                'Bundle': row.get(bundle_column, ''),
+                'Tab': row.get(tab_column, ''),
                 'Document Name': row.get(doc_name_col, '') if doc_name_col else '',
                 'Date': row.get(date_col, '') if date_col else '',
                 'Pages': row.get(pages_col, '') if pages_col else ''
             })
     
     df_output = pd.DataFrame(output_data)
+    print(f"\n   ✅ Extracted {len(df_output)} documents")
     
-    # Save
+    return df_output
+
+
+def save_output(df: pd.DataFrame, output_dir: Path):
+    """Save output to formatted Excel"""
     output_dir.mkdir(parents=True, exist_ok=True)
+    
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    output_file = output_dir / f"Matched_Documents_{timestamp}.xlsx"
+    output_file = output_dir / f"Trial_Bundle_With_Disclosure_IDs_{timestamp}.xlsx"
+    
+    print(f"\n💾 Saving to: {output_file.name}")
     
     with pd.ExcelWriter(output_file, engine='xlsxwriter') as writer:
-        df_output.to_excel(writer, sheet_name='Matched', index=False)
+        df.to_excel(writer, sheet_name='Documents', index=False)
         
         workbook = writer.book
-        worksheet = writer.sheets['Matched']
+        worksheet = writer.sheets['Documents']
         
         # Header format
         header_fmt = workbook.add_format({
             'bold': True,
             'bg_color': '#4472C4',
-            'font_color': 'white'
+            'font_color': 'white',
+            'border': 1
         })
         
-        for col_num, value in enumerate(df_output.columns):
+        # Apply headers
+        for col_num, value in enumerate(df.columns):
             worksheet.write(0, col_num, value, header_fmt)
         
         # Column widths
-        worksheet.set_column('A:A', 25)
-        worksheet.set_column('B:B', 70)
-        worksheet.set_column('C:C', 15)
-        worksheet.set_column('D:D', 10)
+        worksheet.set_column('A:A', 20)  # Disclosure ID
+        worksheet.set_column('B:B', 12)  # Bundle
+        worksheet.set_column('C:C', 12)  # Tab
+        worksheet.set_column('D:D', 70)  # Document Name
+        worksheet.set_column('E:E', 15)  # Date
+        worksheet.set_column('F:F', 10)  # Pages
     
-    print(f"\n✅ SUCCESS!")
-    print(f"   Output: {output_file.name}")
-    print(f"   Documents: {len(df_output)}")
-    print(f"\n💡 Next: Run review_folder_69.py")
+    print(f"   ✅ Saved successfully!")
+    print(f"   Location: {output_file}")
+    
+    return output_file
+
+
+def main():
+    """Main execution"""
+    
+    print("="*70)
+    print("TRIAL BUNDLE INDEX - DISCLOSURE ID GENERATOR")
+    print("="*70)
+    print("\nThis tool:")
+    print("  ✓ Parses Trial Bundle Index Excel")
+    print("  ✓ Creates Disclosure IDs: {Bundle}_{Tab}")
+    print("  ✓ Extracts all relevant columns")
+    print("\nExample Disclosure IDs:")
+    print("  AA_1, AA_1.1, BB_12, CC_45.6")
+    
+    # File paths
+    project_root = Path.cwd()
+    downloads = Path.home() / "Downloads" / "To be discussed"
+    bundle_file = downloads / "Trial Bundle Index - Excel - Draft 2 - 29.09.25.xlsx"
+    
+    # Check file exists
+    if not bundle_file.exists():
+        print(f"\n❌ Not found: {bundle_file}")
+        bundle_file = Path(input("\n   Enter full path to Trial Bundle file: ").strip())
+    
+    try:
+        # Load file
+        print("\n" + "="*70)
+        print("STEP 1: LOADING FILE")
+        print("="*70)
+        
+        df_bundle = load_excel_intelligently(bundle_file)
+        
+        # Preview
+        preview_dataframe(df_bundle, "Trial Bundle Index", n=3)
+        
+        if input("\nContinue? (y/n): ").lower() != 'y':
+            print("Cancelled.")
+            return
+        
+        # Find Bundle and Tab columns
+        print("\n" + "="*70)
+        print("STEP 2: SELECTING BUNDLE AND TAB COLUMNS")
+        print("="*70)
+        
+        bundle_column = find_column_interactive(
+            df_bundle,
+            "Bundle (e.g., AA, BB, CC)",
+            ['bundle']
+        )
+        
+        tab_column = find_column_interactive(
+            df_bundle,
+            "Tab (e.g., 1, 1.1, 12)",
+            ['tab']
+        )
+        
+        # Create Disclosure IDs
+        print("\n" + "="*70)
+        print("STEP 3: CREATING DISCLOSURE IDs")
+        print("="*70)
+        
+        df_bundle = create_disclosure_ids(df_bundle, bundle_column, tab_column)
+        
+        # Preview with retry
+        ids_confirmed = False
+        while not ids_confirmed:
+            print("\nDisclosure ID examples:")
+            print(df_bundle[['Disclosure_ID', bundle_column, tab_column]].dropna().head(15).to_string())
+            
+            confirm = input("\nDisclosure IDs look correct? (y/n/restart): ").lower()
+            
+            if confirm == 'y':
+                ids_confirmed = True
+            elif confirm == 'restart':
+                print("\n🔄 Restarting column selection...")
+                bundle_column = find_column_interactive(
+                    df_bundle,
+                    "Bundle (e.g., AA, BB, CC)",
+                    ['bundle']
+                )
+                tab_column = find_column_interactive(
+                    df_bundle,
+                    "Tab (e.g., 1, 1.1, 12)",
+                    ['tab']
+                )
+                df_bundle = create_disclosure_ids(df_bundle, bundle_column, tab_column)
+            else:
+                print("\n❌ Cancelled.")
+                return
+        
+        # Extract all columns
+        print("\n" + "="*70)
+        print("STEP 4: EXTRACTING ALL COLUMNS")
+        print("="*70)
+        
+        df_output = extract_all_columns(df_bundle, bundle_column, tab_column)
+        
+        # Preview output
+        preview_dataframe(df_output, "Final Output", n=10)
+        
+        if input("\nSave this output? (y/n): ").lower() != 'y':
+            print("Cancelled.")
+            return
+        
+        # Save
+        print("\n" + "="*70)
+        print("STEP 5: SAVING OUTPUT")
+        print("="*70)
+        
+        output_dir = project_root / "cases" / "lismore_v_ph" / "analysis" / "folder_69_review"
+        output_file = save_output(df_output, output_dir)
+        
+        # Success
+        print("\n" + "="*70)
+        print("✅ SUCCESS!")
+        print("="*70)
+        print(f"\n📊 Summary:")
+        print(f"   Documents: {len(df_output)}")
+        print(f"   Unique Disclosure IDs: {df_output['Disclosure ID'].nunique()}")
+        print(f"   Output: {output_file.name}")
+        print(f"\n📋 Output columns:")
+        print(f"   • Disclosure ID (AA_1 format)")
+        print(f"   • Bundle")
+        print(f"   • Tab")
+        print(f"   • Document Name")
+        print(f"   • Date")
+        print(f"   • Pages")
+        
+    except KeyboardInterrupt:
+        print("\n\n⚠️  Cancelled by user")
+    except Exception as e:
+        print(f"\n❌ Error: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 if __name__ == '__main__':
-    match_excel_files()
+    main()

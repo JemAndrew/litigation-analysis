@@ -5,6 +5,15 @@ Includes: ChromaDB, Legal-BERT, Hybrid Search, LexNLP, Cohere Reranker, Email Me
 British English throughout
 """
 
+
+# Add src to path for imports
+import sys
+from pathlib import Path
+src_dir = Path(__file__).parent.parent if "src" in str(Path(__file__).parent) else Path(__file__).parent
+if str(src_dir) not in sys.path:
+    sys.path.insert(0, str(src_dir))
+    sys.path.insert(0, str(src_dir.parent))
+
 import chromadb
 from chromadb.config import Settings
 from sentence_transformers import SentenceTransformer
@@ -17,6 +26,7 @@ from tqdm import tqdm
 import re
 import email
 from email import policy
+from src.utils.document_loader import DocumentLoader
 
 # ============================================================================
 # OPTIONAL DEPENDENCIES - Handle gracefully if not installed
@@ -335,7 +345,7 @@ class EnhancedVectorStore:
         Returns:
             Statistics dictionary
         """
-        from ..utils.document_loader import DocumentLoader
+        from src.utils.document_loader import DocumentLoader
         
         loader = DocumentLoader()
         

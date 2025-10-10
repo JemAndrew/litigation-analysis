@@ -1,17 +1,14 @@
 # ============================================================================
 # LITIGATION AI - REQUIREMENTS
 # All dependencies for Smart RAG with enhancements
-# ============================================================================
-
-# Core AI/ML
-python.exe -m pip install --upgrade pip
+# ===================================================
 anthropic>=0.39.0                    # Claude API with prompt caching support
 sentence-transformers>=2.2.2         # Legal-BERT embeddings
 chromadb>=0.4.18                     # Vector database
-cohere>=4.37                         # Reranker for better retrieval
+                      # Reranker for better retrieval
 
 # Legal text processing
-lexnlp>=2.3.0                        # Legal entity extraction (dates, money, clauses)
+                   # Legal entity extraction (dates, money, clauses)
 
 # Document processing
 pypdf2>=3.0.1                        # PDF text extraction

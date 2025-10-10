@@ -6,6 +6,15 @@ Handles switching between different litigation cases
 British English throughout
 """
 
+
+# Add src to path for imports
+import sys
+from pathlib import Path
+src_dir = Path(__file__).parent.parent if "src" in str(Path(__file__).parent) else Path(__file__).parent
+if str(src_dir) not in sys.path:
+    sys.path.insert(0, str(src_dir))
+    sys.path.insert(0, str(src_dir.parent))
+
 import json
 from pathlib import Path
 from typing import Dict, List, Optional

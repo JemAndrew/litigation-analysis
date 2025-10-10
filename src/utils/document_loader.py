@@ -5,6 +5,15 @@ British English throughout
 """
 
 from pathlib import Path
+
+# Add src to path for imports
+import sys
+from pathlib import Path
+src_dir = Path(__file__).parent.parent if "src" in str(Path(__file__).parent) else Path(__file__).parent
+if str(src_dir) not in sys.path:
+    sys.path.insert(0, str(src_dir))
+    sys.path.insert(0, str(src_dir.parent))
+
 from typing import Optional
 import PyPDF2
 from docx import Document
