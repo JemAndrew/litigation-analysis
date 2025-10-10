@@ -30,7 +30,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from anthropic import Anthropic
 from src.intelligence.vector_store import EnhancedVectorStore
 from src.intelligence.knowledge_graph import CumulativeKnowledgeGraph
-from src.prompts.enhanced_analysis_prompts import EnhancedAnalysisPrompts
+from src.prompts.universal_forensic_prompts import UniversalForensicPrompts
+from prompts.analysis_prompt import AnalysisPrompts
 
 
 @dataclass
@@ -122,7 +123,7 @@ class EnhancedFolder69Reviewer:
             raise ValueError("ANTHROPIC_API_KEY not set! Set it in .env file or environment.")
         
         self.claude = Anthropic(api_key=api_key)
-        self.prompts = EnhancedAnalysisPrompts()
+        self.prompts = AnalysisPrompts()
         
         # Vector store
         print("📚 Loading vector store...")

@@ -5,7 +5,7 @@ British English throughout
 """
 
 
-class EnhancedAnalysisPrompts:
+class AnalysisPrompts:
     """Prompts that provide detailed explanations for every score"""
     
     @staticmethod
