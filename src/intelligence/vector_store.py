@@ -230,7 +230,33 @@ class EnhancedVectorStore:
             i += (chunk_size - overlap)
         
         return chunks if chunks else [text]
-    
+        
+    def extract_email_metadata(self, file_path: Path) -> dict:
+        """
+        Extract email metadata from .msg or .eml files
+        
+        Args:
+            file_path: Path to email file
+            
+        Returns:
+            Dict with email metadata
+        """
+        if file_path.suffix.lower() not in ['.msg', '.eml']:
+            return {}
+        
+        try:
+            with open(file_path, 'rb') as f:
+                msg = email.message_from_binary_file(f, policy=policy.default)
+            
+            return {
+                'email_from': msg.get('From', ''),
+                'email_to': msg.get('To', ''),
+                'email_date': msg.get('Date', ''),
+                'email_subject': msg.get('Subject', '')
+            }
+        except:
+            return {}
+
     def ingest_document(self, file_path: Path, document_text: str) -> int:
         """
         Ingest single document with all enhancements
