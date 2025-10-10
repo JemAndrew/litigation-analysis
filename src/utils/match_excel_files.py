@@ -19,8 +19,12 @@ def match_excel_files():
     
     # Paths
     project_root = Path.cwd()
-    list_file = project_root / "List of Documents Received from PHL on 15.09.25  Draft 1  16.09.25.xlsx"
-    bundle_file = project_root / "Trial Bundle Index  Excel  Draft 2  29.09.25.xlsx"
+    # CORRECT PATHS - Direct to Downloads folder with correct filenames
+    list_file = Path(r"C:\Users\JemAndrew\Downloads\To be discussed\List of Documents Received from PHL on 15.09.25 - Draft 1 - 16.09.25.xlsx")
+    bundle_file = Path(r"C:\Users\JemAndrew\Downloads\To be discussed\Trial Bundle Index - Excel - Draft 2 - 29.09.25.xlsx")
+    
+    # Output location (in your project)
+    project_root = Path(__file__).parent.parent.parent  # Go up from src/utils/ to project root
     output_dir = project_root / "cases" / "lismore_v_ph" / "analysis" / "folder_69_review"
     
     # Check files

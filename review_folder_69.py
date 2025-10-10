@@ -11,7 +11,7 @@ import os
 project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
 
-from src.intelligence.reviewer import EnhancedFolder69Reviewer
+from intelligence.reviewer import EnhancedFolder69Reviewer
 
 
 def main():

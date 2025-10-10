@@ -28,9 +28,8 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from anthropic import Anthropic
-from src.intelligence.vector_store import EnhancedVectorStore
-from src.intelligence.knowledge_graph import CumulativeKnowledgeGraph
-from src.prompts.universal_forensic_prompts import UniversalForensicPrompts
+from intelligence.vector_store import EnhancedVectorStore
+from intelligence.knowledge_graph import CumulativeKnowledgeGraph
 from prompts.analysis_prompt import AnalysisPrompts
 
 
