@@ -318,7 +318,7 @@ class QueryEngine:
         context += prior_findings
         
         # Step 5: Get appropriate prompt
-        from prompts.universal_forensic_prompts import ForensicPrompts
+        from src.prompts.universal_forensic_prompts import ForensicPrompts
         prompts = ForensicPrompts()
         
         if prompt_type == 'smoking_gun':

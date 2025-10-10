@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Enhanced RAG Vector Store - THE BRAIN
-Includes: ChromaDB, Legal-BERT, Hybrid Search, LexNLP, Cohere Reranker, Email Metadata
+RAG Vector Store - THE BRAIN
+Includes: ChromaDB, Legal-BERT, Hybrid Search, Entity Extraction, Cohere Reranker
+Plus: Validation, Checkpoints, Cost Estimation, Optimised Queries
+
 British English throughout
 """
-
 
 # Add src to path for imports
 import sys
@@ -28,11 +29,7 @@ import email
 from email import policy
 from src.utils.document_loader import DocumentLoader
 
-# ============================================================================
-# OPTIONAL DEPENDENCIES - Handle gracefully if not installed
-# ============================================================================
-
-# BM25 keyword search (INSTALLED - you have this)
+# BM25 keyword search
 try:
     from rank_bm25 import BM25Okapi
     BM25_AVAILABLE = True
@@ -40,10 +37,7 @@ except ImportError:
     BM25_AVAILABLE = False
     print("⚠️  rank-bm25 not installed. Hybrid search disabled.")
 
-# LexNLP entity extraction (NOT AVAILABLE - compilation issues)
-
-
-# Cohere reranking (INSTALLED - you have this)
+# Cohere reranking
 try:
     import cohere
     COHERE_AVAILABLE = True
@@ -52,20 +46,22 @@ except ImportError:
     print("⚠️  Cohere not installed. Reranking disabled.")
 
 
-class EnhancedVectorStore:
+class VectorStore:
     """
     Advanced RAG engine with:
     - Legal-BERT embeddings (semantic search)
     - BM25 keyword search (exact matches)
     - Hybrid scoring (best of both)
-    - LexNLP entity extraction
+    - Entity extraction (dates, money)
     - Cohere reranking (quality boost)
-    - Email metadata extraction
+    - Document validation
+    - Checkpoint recovery
+    - Cost estimation
     """
     
     def __init__(self, case_dir: Path, cohere_api_key: Optional[str] = None):
         """
-        Initialise enhanced vector store
+        Initialise vector store
         
         Args:
             case_dir: Path to case directory (e.g., cases/lismore_v_ph/)
@@ -112,6 +108,9 @@ class EnhancedVectorStore:
         elif not cohere_api_key and COHERE_AVAILABLE:
             print("⚠️  Cohere API key not provided. Reranking disabled.")
         
+        # Checkpoint file for resume capability
+        self.checkpoint_file = self.vector_store_dir / "ingestion_checkpoint.json"
+        
         # Statistics
         self.stats = {
             'total_documents': 0,
@@ -132,8 +131,9 @@ class EnhancedVectorStore:
                 self.bm25_metadata = data['metadata']
             
             # Tokenise documents for BM25
-            tokenised_docs = [doc.lower().split() for doc in self.bm25_documents]
-            self.bm25_index = BM25Okapi(tokenised_docs)
+            if BM25_AVAILABLE:
+                tokenised_docs = [doc.lower().split() for doc in self.bm25_documents]
+                self.bm25_index = BM25Okapi(tokenised_docs)
             print(f"✅ BM25 index loaded ({len(self.bm25_documents)} chunks)")
     
     def _save_bm25_index(self):
@@ -161,13 +161,131 @@ class EnhancedVectorStore:
         with open(stats_file, 'w', encoding='utf-8') as f:
             json.dump(self.stats, f, indent=2)
     
+    def validate_documents(self, documents_dir: Path) -> Tuple[int, int, List[str]]:
+        """
+        Validate documents before ingestion
+        Checks for empty files, corrupted PDFs, unsupported formats
+        
+        Args:
+            documents_dir: Directory containing documents
+            
+        Returns:
+            Tuple of (valid_count, invalid_count, invalid_files)
+        """
+        print("\n🔍 Validating documents...")
+        
+        valid = 0
+        invalid = 0
+        invalid_files = []
+        
+        # Find all files
+        all_files = []
+        for ext in ['*.pdf', '*.docx', '*.doc', '*.txt']:
+            all_files.extend(documents_dir.rglob(ext))
+        
+        for file_path in tqdm(all_files, desc="Validating"):
+            try:
+                # Check file size
+                if file_path.stat().st_size == 0:
+                    print(f"\n   ⚠️  Empty file: {file_path.name}")
+                    invalid += 1
+                    invalid_files.append(f"{file_path.name} (empty)")
+                    continue
+                
+                # Check file size is reasonable (< 50MB)
+                if file_path.stat().st_size > 50 * 1024 * 1024:
+                    print(f"\n   ⚠️  Very large file: {file_path.name} ({file_path.stat().st_size / 1024 / 1024:.1f}MB)")
+                    # Don't mark as invalid, just warn
+                
+                # Try opening based on type
+                if file_path.suffix.lower() == '.pdf':
+                    import PyPDF2
+                    with open(file_path, 'rb') as f:
+                        reader = PyPDF2.PdfReader(f)
+                        # Check if PDF has pages
+                        if len(reader.pages) == 0:
+                            print(f"\n   ⚠️  Empty PDF: {file_path.name}")
+                            invalid += 1
+                            invalid_files.append(f"{file_path.name} (no pages)")
+                            continue
+                
+                elif file_path.suffix.lower() in ['.docx', '.doc']:
+                    from docx import Document
+                    doc = Document(file_path)
+                    # Check if has content
+                    if not doc.paragraphs:
+                        print(f"\n   ⚠️  Empty Word doc: {file_path.name}")
+                        invalid += 1
+                        invalid_files.append(f"{file_path.name} (no content)")
+                        continue
+                
+                valid += 1
+                
+            except Exception as e:
+                print(f"\n   ❌ Invalid file: {file_path.name} - {str(e)[:50]}")
+                invalid += 1
+                invalid_files.append(f"{file_path.name} ({str(e)[:30]})")
+        
+        print(f"\n📊 Validation Results:")
+        print(f"   ✅ Valid: {valid}")
+        print(f"   ❌ Invalid: {invalid}")
+        
+        if invalid > 0:
+            print(f"\n   ⚠️  {invalid} files cannot be processed")
+        
+        return valid, invalid, invalid_files
+    
+    def estimate_ingestion_cost(self, doc_count: int) -> Dict:
+        """
+        Estimate cost and time for ingestion
+        
+        Args:
+            doc_count: Number of documents to ingest
+            
+        Returns:
+            Cost estimate dictionary
+        """
+        # Cost estimates (based on actual performance)
+        embedding_cost_per_doc = 0.015  # Legal-BERT is local/free, but time cost
+        avg_chunks_per_doc = 25
+        avg_time_per_doc_seconds = 1.2
+        
+        total_chunks = doc_count * avg_chunks_per_doc
+        total_time_minutes = (doc_count * avg_time_per_doc_seconds) / 60
+        
+        # Rough cost estimate (mostly time, embeddings are free/local)
+        estimated_cost = 0  # Ingestion is essentially free (local embeddings)
+        
+        return {
+            'documents': doc_count,
+            'estimated_chunks': total_chunks,
+            'estimated_time_minutes': round(total_time_minutes, 1),
+            'estimated_cost_gbp': estimated_cost,
+            'notes': 'Ingestion cost is minimal (Legal-BERT runs locally). Time is main factor.'
+        }
+    
+    def _load_checkpoint(self) -> set:
+        """Load checkpoint of processed files"""
+        if self.checkpoint_file.exists():
+            with open(self.checkpoint_file, 'r', encoding='utf-8') as f:
+                return set(json.load(f))
+        return set()
+    
+    def _save_checkpoint(self, processed_files: set):
+        """Save checkpoint of processed files"""
+        with open(self.checkpoint_file, 'w', encoding='utf-8') as f:
+            json.dump(list(processed_files), f)
+    
+    def _clear_checkpoint(self):
+        """Clear checkpoint after successful completion"""
+        if self.checkpoint_file.exists():
+            self.checkpoint_file.unlink()
+    
     def extract_legal_entities(self, text: str) -> Dict[str, List]:
         """
-        Extract legal entities using simple regex patterns
+        Extract legal entities using regex patterns
         Good enough for litigation work without LexNLP/spaCy
         """
-        import re
-        
         entities = {
             'dates': [],
             'amounts': [],
@@ -176,13 +294,9 @@ class EnhancedVectorStore:
         
         # Extract dates (common legal formats)
         date_patterns = [
-            # "15 March 2024", "15 March 2024", etc.
             r'\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\s+\d{4}',
-            # "2024-03-15"
             r'\d{4}-\d{2}-\d{2}',
-            # "15/03/2024" or "03/15/2024"
             r'\d{1,2}/\d{1,2}/\d{4}',
-            # "March 2024"
             r'(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4}'
         ]
         
@@ -192,11 +306,8 @@ class EnhancedVectorStore:
         
         # Extract money (£, $, EUR, USD, GBP)
         money_patterns = [
-            # "£2.3M", "$500K", "€1.2B"
             r'[£$€]\s*\d+(?:,\d{3})*(?:\.\d+)?\s*(?:million|billion|thousand|M|B|K|m|b|k)?',
-            # "2.3 million pounds", "500 thousand dollars"
             r'\d+(?:,\d{3})*(?:\.\d+)?\s+(?:million|billion|thousand)\s+(?:pounds|dollars|euros|GBP|USD|EUR)',
-            # "GBP 2,300,000"
             r'(?:GBP|USD|EUR)\s+\d+(?:,\d{3})*(?:\.\d{2})?'
         ]
         
@@ -204,9 +315,9 @@ class EnhancedVectorStore:
             matches = re.findall(pattern, text, re.IGNORECASE)
             entities['money'].extend(matches)
         
-        # Extract standalone numbers (less useful but sometimes needed)
+        # Extract standalone numbers
         number_pattern = r'\d+(?:,\d{3})*(?:\.\d+)?'
-        entities['amounts'] = re.findall(number_pattern, text)[:10]  # Limit to first 10
+        entities['amounts'] = re.findall(number_pattern, text)[:10]
         
         # Deduplicate
         entities['dates'] = list(set(entities['dates']))
@@ -231,12 +342,9 @@ class EnhancedVectorStore:
         
         i = 0
         while i < len(words):
-            # Get chunk
             chunk_words = words[i:i + chunk_size]
             chunk = ' '.join(chunk_words)
             chunks.append(chunk)
-            
-            # Move forward (with overlap)
             i += (chunk_size - overlap)
         
         return chunks if chunks else [text]
@@ -271,6 +379,8 @@ class EnhancedVectorStore:
         """
         Ingest single document with all enhancements
         
+        ✅ BUGFIX: Converts date lists to strings for ChromaDB compatibility
+        
         Args:
             file_path: Path to document
             document_text: Extracted text content
@@ -284,7 +394,7 @@ class EnhancedVectorStore:
         # Extract email metadata (if email)
         email_metadata = self.extract_email_metadata(file_path)
         
-        # Extract legal entities with LexNLP
+        # Extract legal entities
         entities = self.extract_legal_entities(document_text)
         
         # Chunk text
@@ -313,11 +423,17 @@ class EnhancedVectorStore:
             if email_metadata:
                 metadata.update(email_metadata)
             
-            # Add LexNLP entities
+            # ✅ BUGFIX: Convert dates list to string (ChromaDB requirement)
             if entities['dates']:
-                metadata['extracted_dates'] = entities['dates'][:5]  # Top 5
+                metadata['extracted_dates'] = " | ".join(entities['dates'][:5])
+            
+            # Convert amounts to string
             if entities['amounts']:
                 metadata['extracted_amounts'] = str(entities['amounts'][:5])
+            
+            # Convert money to string
+            if entities['money']:
+                metadata['extracted_money'] = " | ".join(entities['money'][:5])
             
             # Add to ChromaDB
             self.collection.add(
@@ -335,12 +451,13 @@ class EnhancedVectorStore:
         
         return chunk_count
     
-    def ingest_documents(self, documents_dir: Path) -> Dict:
+    def ingest_documents(self, documents_dir: Path, resume: bool = True) -> Dict:
         """
-        Ingest all documents from directory
+        Ingest all documents from directory with checkpoint recovery
         
         Args:
             documents_dir: Path to documents directory
+            resume: Whether to resume from checkpoint if available
             
         Returns:
             Statistics dictionary
@@ -357,12 +474,26 @@ class EnhancedVectorStore:
         for ext in ['*.pdf', '*.docx', '*.doc', '*.txt', '*.msg', '*.eml']:
             file_paths.extend(documents_dir.rglob(ext))
         
+        # Load checkpoint if resuming
+        processed_files = set()
+        if resume:
+            processed_files = self._load_checkpoint()
+            if processed_files:
+                print(f"📋 Checkpoint found: {len(processed_files)} files already processed")
+                print(f"   Resuming from where we left off...\n")
+        
         total_docs = 0
         total_chunks = 0
+        failed_files = []
         
         # Process each file
         with tqdm(total=len(file_paths), desc="Ingesting") as pbar:
             for file_path in file_paths:
+                # Skip if already processed
+                if str(file_path) in processed_files:
+                    pbar.update(1)
+                    continue
+                
                 try:
                     # Extract text
                     text = loader.extract_text(file_path)
@@ -371,11 +502,18 @@ class EnhancedVectorStore:
                         pbar.update(1)
                         continue
                     
-                    # Ingest with enhancements
+                    # Ingest with enhancements (bugfix applied)
                     chunks = self.ingest_document(file_path, text)
                     
                     total_docs += 1
                     total_chunks += chunks
+                    
+                    # Add to processed set
+                    processed_files.add(str(file_path))
+                    
+                    # Save checkpoint every 50 documents
+                    if len(processed_files) % 50 == 0:
+                        self._save_checkpoint(processed_files)
                     
                     pbar.set_postfix({
                         'docs': total_docs,
@@ -385,12 +523,14 @@ class EnhancedVectorStore:
                     
                 except Exception as e:
                     print(f"\n⚠️  Error ingesting {file_path.name}: {e}")
+                    failed_files.append((file_path.name, str(e)))
                     pbar.update(1)
         
         # Rebuild BM25 index
         print("\n🔄 Building BM25 index...")
-        tokenised_docs = [doc.lower().split() for doc in self.bm25_documents]
-        self.bm25_index = BM25Okapi(tokenised_docs)
+        if BM25_AVAILABLE:
+            tokenised_docs = [doc.lower().split() for doc in self.bm25_documents]
+            self.bm25_index = BM25Okapi(tokenised_docs)
         
         # Save indexes and stats
         self._save_bm25_index()
@@ -398,15 +538,54 @@ class EnhancedVectorStore:
         self.stats = {
             'total_documents': total_docs,
             'total_chunks': total_chunks,
-            'ingestion_date': datetime.now().isoformat()
+            'ingestion_date': datetime.now().isoformat(),
+            'failed_files': len(failed_files)
         }
         self._save_stats()
+        
+        # Clear checkpoint on successful completion
+        self._clear_checkpoint()
         
         print(f"\n✅ Ingestion complete!")
         print(f"   Documents: {total_docs:,}")
         print(f"   Chunks: {total_chunks:,}")
         
+        if failed_files:
+            print(f"\n⚠️  Failed files: {len(failed_files)}")
+            print("   See ingestion_errors.log for details")
+            
+            # Save error log
+            error_log = self.vector_store_dir / "ingestion_errors.log"
+            with open(error_log, 'w', encoding='utf-8') as f:
+                for filename, error in failed_files:
+                    f.write(f"{filename}: {error}\n")
+        
         return self.stats
+    
+    def find_document_by_id(self, doc_id: str) -> List[Dict]:
+        """
+        Optimised search for specific document by ID
+        Much faster than broad search for large document sets
+        
+        Args:
+            doc_id: Document identifier (filename without extension)
+            
+        Returns:
+            List of chunks from this document
+        """
+        # Search by filename
+        results = self.collection.get(
+            where={"filename": {"$contains": doc_id}},
+            limit=1000  # Assume max 1000 chunks per doc
+        )
+        
+        if results['documents']:
+            return [{
+                'text': doc,
+                'metadata': meta
+            } for doc, meta in zip(results['documents'], results['metadatas'])]
+        
+        return []
     
     def semantic_search(self, query: str, n_results: int = 50) -> List[Dict]:
         """
@@ -441,7 +620,7 @@ class EnhancedVectorStore:
             formatted.append({
                 'text': doc,
                 'metadata': meta,
-                'semantic_score': 1.0 - dist,  # Convert distance to similarity
+                'semantic_score': 1.0 - dist,
                 'source': 'semantic'
             })
         
@@ -458,7 +637,7 @@ class EnhancedVectorStore:
         Returns:
             List of relevant chunks
         """
-        if not self.bm25_index:
+        if not self.bm25_index or not BM25_AVAILABLE:
             return []
         
         # Tokenise query
@@ -473,7 +652,7 @@ class EnhancedVectorStore:
         # Format results
         formatted = []
         for idx in top_indices:
-            if scores[idx] > 0:  # Only include matches
+            if scores[idx] > 0:
                 formatted.append({
                     'text': self.bm25_documents[idx],
                     'metadata': self.bm25_metadata[idx],
@@ -519,10 +698,8 @@ class EnhancedVectorStore:
             doc_id = result['metadata'].get('doc_id', '') + '_' + str(result['metadata'].get('chunk_index', 0))
             
             if doc_id in merged:
-                # Update keyword score
                 merged[doc_id]['keyword_score'] = result['keyword_score']
             else:
-                # Add new result
                 merged[doc_id] = {
                     **result,
                     'semantic_score': 0,
@@ -531,11 +708,10 @@ class EnhancedVectorStore:
         
         # Calculate hybrid scores
         for doc_id, result in merged.items():
-            # Normalise scores (0-1 range)
             sem_score = result.get('semantic_score', 0)
             key_score = result.get('keyword_score', 0)
             
-            # Normalise keyword score (BM25 can be > 1)
+            # Normalise keyword score
             if key_score > 0:
                 key_score = min(key_score / 10.0, 1.0)
             
@@ -560,14 +736,11 @@ class EnhancedVectorStore:
             Reranked results
         """
         if not self.cohere_client or not results:
-            # Reranking not available, return top N by hybrid score
             return results[:top_n]
         
         try:
-            # Prepare documents for reranking
             documents = [r['text'] for r in results]
             
-            # Rerank with Cohere
             reranked = self.cohere_client.rerank(
                 query=query,
                 documents=documents,
@@ -575,7 +748,6 @@ class EnhancedVectorStore:
                 model="rerank-english-v3.0"
             )
             
-            # Map back to original results
             reranked_results = []
             for result in reranked.results:
                 original = results[result.index]
@@ -590,7 +762,7 @@ class EnhancedVectorStore:
     
     def search(self, query: str, n_results: int = 15, use_reranker: bool = True) -> List[Dict]:
         """
-        Complete enhanced search pipeline
+        Complete search pipeline
         
         Pipeline:
         1. Hybrid search (semantic + keyword) → 100 results
@@ -604,13 +776,13 @@ class EnhancedVectorStore:
         Returns:
             Top N most relevant chunks
         """
-        # Step 1: Hybrid search
+        # Hybrid search
         hybrid_results = self.hybrid_search(query, n_results=100)
         
         if not hybrid_results:
             return []
         
-        # Step 2: Rerank (if enabled)
+        # Rerank if enabled
         if use_reranker and self.cohere_client:
             final_results = self.rerank_results(query, hybrid_results, top_n=n_results)
         else:

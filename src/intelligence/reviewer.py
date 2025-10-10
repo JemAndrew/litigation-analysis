@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Enhanced Folder 69 Document Reviewer
+Folder 69 Document Reviewer
 Provides detailed explanations for every document score
 
 Features:
@@ -9,12 +9,24 @@ Features:
 - Litigation value assessment
 - Tactical recommendations
 - Excel export with all details
+- Pre-ingestion validation
+- Cost estimation
+- Checkpoint recovery
 
 British English throughout
 """
 
 import sys
 from pathlib import Path
+
+# Add src to path for imports
+import sys
+from pathlib import Path
+src_dir = Path(__file__).parent.parent if "src" in str(Path(__file__).parent) else Path(__file__).parent
+if str(src_dir) not in sys.path:
+    sys.path.insert(0, str(src_dir))
+    sys.path.insert(0, str(src_dir.parent))
+
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
@@ -28,13 +40,13 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from anthropic import Anthropic
-from src.intelligence.vector_store import EnhancedVectorStore
+from src.intelligence.vector_store import VectorStore
 from src.intelligence.knowledge_graph import CumulativeKnowledgeGraph
 from src.prompts.analysis_prompt import AnalysisPrompts
 
 
 @dataclass
-class EnhancedDocumentScore:
+class DocumentScore:
     """Complete document analysis with detailed explanations"""
     # Identity
     doc_id: str
@@ -82,7 +94,7 @@ class EnhancedDocumentScore:
     cost_gbp: float = 0.0
 
 
-class EnhancedFolder69Reviewer:
+class Folder69Reviewer:
     """
     Complete folder 69 reviewer with detailed explanations
     """
@@ -94,7 +106,7 @@ class EnhancedFolder69Reviewer:
                  claimant: str = "Lismore Limited",
                  respondent: str = "Process Holdings plc"):
         """
-        Initialise enhanced reviewer
+        Initialise reviewer
         
         Args:
             case_dir: Path to case directory
@@ -111,11 +123,11 @@ class EnhancedFolder69Reviewer:
         self.respondent = respondent
         
         # Results directory
-        self.results_dir = self.case_dir / "analysis" / "folder_69_enhanced_review"
+        self.results_dir = self.case_dir / "analysis" / "folder_69_review"
         self.results_dir.mkdir(parents=True, exist_ok=True)
         
-        # Initialize components
-        print("🔧 Initializing enhanced reviewer...")
+        # Initialise components
+        print("🔧 Initialising reviewer...")
         
         api_key = os.getenv('ANTHROPIC_API_KEY')
         if not api_key:
@@ -126,7 +138,7 @@ class EnhancedFolder69Reviewer:
         
         # Vector store
         print("📚 Loading vector store...")
-        self.vector_store = EnhancedVectorStore(
+        self.vector_store = VectorStore(
             case_dir=self.case_dir,
             cohere_api_key=os.getenv('COHERE_API_KEY')
         )
@@ -142,10 +154,10 @@ class EnhancedFolder69Reviewer:
         
         # Statistics
         self.total_cost_gbp = 0.0
-        self.documents_analyzed = 0
-        self.document_scores: List[EnhancedDocumentScore] = []
+        self.documents_analysed = 0
+        self.document_scores: List[DocumentScore] = []
         
-        print("✅ Enhanced reviewer ready!\n")
+        print("✅ Reviewer ready!\n")
     
     def _load_doc_metadata(self):
         """Load document metadata from matched Excel"""
@@ -168,6 +180,58 @@ class EnhancedFolder69Reviewer:
             print(f"⚠️  Could not load metadata Excel: {e}")
             print("   Continuing without metadata...\n")
     
+    def validate_documents(self) -> Tuple[int, int, List[str]]:
+        """
+        Validate documents before ingestion
+        
+        Returns:
+            Tuple of (valid_count, invalid_count, invalid_files)
+        """
+        return self.vector_store.validate_documents(self.folder_69_path)
+    
+    def estimate_costs(self) -> Dict:
+        """
+        Estimate complete analysis costs
+        
+        Returns:
+            Cost breakdown dictionary
+        """
+        # Count documents
+        pdf_files = list(self.folder_69_path.rglob('*.pdf'))
+        docx_files = list(self.folder_69_path.rglob('*.docx'))
+        doc_count = len(pdf_files) + len(docx_files)
+        
+        # Ingestion cost
+        ingestion_estimate = self.vector_store.estimate_ingestion_cost(doc_count)
+        
+        # Analysis cost (£0.35 per document with extended thinking)
+        analysis_cost_per_doc = 0.35
+        total_analysis_cost = doc_count * analysis_cost_per_doc
+        analysis_time_mins = (doc_count * 90) / 60  # 90 seconds per doc
+        
+        # Total
+        total_cost = ingestion_estimate['estimated_cost_gbp'] + total_analysis_cost
+        total_time_mins = ingestion_estimate['estimated_time_minutes'] + analysis_time_mins
+        
+        return {
+            'documents': doc_count,
+            'ingestion': {
+                'cost_gbp': ingestion_estimate['estimated_cost_gbp'],
+                'time_minutes': ingestion_estimate['estimated_time_minutes'],
+                'chunks': ingestion_estimate['estimated_chunks']
+            },
+            'analysis': {
+                'cost_gbp': total_analysis_cost,
+                'time_minutes': round(analysis_time_mins, 1),
+                'cost_per_doc': analysis_cost_per_doc
+            },
+            'total': {
+                'cost_gbp': round(total_cost, 2),
+                'time_minutes': round(total_time_mins, 1),
+                'time_hours': round(total_time_mins / 60, 1)
+            }
+        }
+    
     def ingest_documents(self):
         """Ingest Folder 69 documents into vector store"""
         print(f"{'='*70}")
@@ -183,9 +247,19 @@ class EnhancedFolder69Reviewer:
                 return stats
         
         print(f"📂 Ingesting from: {self.folder_69_path}")
-        print("⏱️  This will take 15-30 minutes for large document sets...\n")
         
-        stats = self.vector_store.ingest_documents(self.folder_69_path)
+        # Show cost estimate
+        estimate = self.estimate_costs()
+        print(f"\n💰 Estimated ingestion:")
+        print(f"   Time: {estimate['ingestion']['time_minutes']:.1f} minutes")
+        print(f"   Chunks: {estimate['ingestion']['chunks']:,}")
+        
+        proceed = input("\nProceed with ingestion? (y/n): ")
+        if proceed.lower() != 'y':
+            print("Cancelled.")
+            return None
+        
+        stats = self.vector_store.ingest_documents(self.folder_69_path, resume=True)
         
         print(f"\n✅ Ingestion complete!")
         print(f"   Documents: {stats['total_documents']:,}")
@@ -195,7 +269,7 @@ class EnhancedFolder69Reviewer:
     
     def analyse_single_document(self,
                                 doc_id: str,
-                                doc_chunks: List[Dict]) -> EnhancedDocumentScore:
+                                doc_chunks: List[Dict]) -> DocumentScore:
         """
         Analyse one document with detailed explanations
         
@@ -204,7 +278,7 @@ class EnhancedFolder69Reviewer:
             doc_chunks: Retrieved chunks from this document
             
         Returns:
-            EnhancedDocumentScore with all details
+            DocumentScore with all details
         """
         # Get metadata
         metadata = self.doc_metadata.get(doc_id, {})
@@ -254,7 +328,7 @@ class EnhancedFolder69Reviewer:
             # Store in knowledge graph
             self.knowledge_graph.add_finding({
                 'query': f'Document analysis: {doc_id}',
-                'prompt_type': 'enhanced_document_analysis',
+                'prompt_type': 'document_analysis',
                 'analysis': analysis,
                 'citations': [doc_id],
                 'timestamp': datetime.now().isoformat()
@@ -265,7 +339,7 @@ class EnhancedFolder69Reviewer:
         except Exception as e:
             print(f"   ❌ Error: {e}")
             # Return minimal score on error
-            return EnhancedDocumentScore(
+            return DocumentScore(
                 doc_id=doc_id,
                 filename=doc_chunks[0]['metadata'].get('filename', '') if doc_chunks else '',
                 document_name=document_name,
@@ -276,8 +350,8 @@ class EnhancedFolder69Reviewer:
                        doc_id: str,
                        analysis: str,
                        metadata: Dict,
-                       cost_gbp: float) -> EnhancedDocumentScore:
-        """Parse Claude's structured analysis into EnhancedDocumentScore"""
+                       cost_gbp: float) -> DocumentScore:
+        """Parse Claude's structured analysis into DocumentScore"""
         
         # Extract scores using regex
         smoking_match = re.search(r'SMOKING GUN SCORE:\s*(\d+(?:\.\d+)?)/10', analysis, re.IGNORECASE)
@@ -326,13 +400,13 @@ class EnhancedFolder69Reviewer:
         # Extract critical factors
         factors_match = re.findall(r'\d+\.\s*\[([^\]]+)\]', overall_explanation)
         
-        return EnhancedDocumentScore(
+        return DocumentScore(
             doc_id=doc_id,
             filename=doc_id,
             document_name=metadata.get('document_name', ''),
             date=metadata.get('date', ''),
             pages=metadata.get('pages', ''),
-            document_summary=doc_summary[:500],  # Limit length
+            document_summary=doc_summary[:500],
             smoking_gun_score=smoking_score,
             concealment_score=conceal_score,
             contradiction_score=contra_score,
@@ -359,7 +433,7 @@ class EnhancedFolder69Reviewer:
             sample_size: If provided, only analyse N documents (for testing)
         """
         print(f"{'='*70}")
-        print("ENHANCED DOCUMENT ANALYSIS")
+        print("DOCUMENT ANALYSIS")
         print(f"{'='*70}\n")
         
         stats = self.vector_store.get_stats()
@@ -376,8 +450,12 @@ class EnhancedFolder69Reviewer:
             print(f"🧪 SAMPLE MODE: Analysing {sample_size} documents for testing")
             total_docs = min(sample_size, total_docs)
         
-        print(f"\n💰 Estimated cost: £{total_docs * 0.35:.2f}")
-        print(f"⏱️  Estimated time: {total_docs * 1.5:.0f} minutes")
+        # Show cost estimate
+        cost_estimate = total_docs * 0.35
+        time_estimate = (total_docs * 90) / 60
+        
+        print(f"\n💰 Estimated cost: £{cost_estimate:.2f}")
+        print(f"⏱️  Estimated time: {time_estimate:.1f} minutes ({time_estimate/60:.1f} hours)")
         
         proceed = input("\nProceed with analysis? (y/n): ")
         if proceed.lower() != 'y':
@@ -413,18 +491,17 @@ class EnhancedFolder69Reviewer:
         print(f"{'='*70}\n")
         
         for i, doc_id in enumerate(tqdm(doc_ids_list, desc="Analysing"), 1):
-            # Get all chunks for this document
-            doc_results = self.vector_store.search(
-                query=doc_id,
-                n_results=15,
-                use_reranker=False
-            )
+            # Get all chunks for this document using optimised search
+            doc_chunks = self.vector_store.find_document_by_id(doc_id)
             
-            # Filter to only chunks from this document
-            doc_chunks = [
-                r for r in doc_results
-                if doc_id in r['metadata'].get('filename', '')
-            ]
+            if not doc_chunks:
+                # Fallback to regular search
+                doc_results = self.vector_store.search(
+                    query=doc_id,
+                    n_results=15,
+                    use_reranker=False
+                )
+                doc_chunks = [r for r in doc_results if doc_id in r['metadata'].get('filename', '')]
             
             if not doc_chunks:
                 continue
@@ -432,7 +509,7 @@ class EnhancedFolder69Reviewer:
             # Analyse with full explanations
             score = self.analyse_single_document(doc_id, doc_chunks)
             self.document_scores.append(score)
-            self.documents_analyzed += 1
+            self.documents_analysed += 1
             
             # Show progress every 10 docs
             if i % 10 == 0:
@@ -444,7 +521,7 @@ class EnhancedFolder69Reviewer:
         print(f"\n{'='*70}")
         print("✅ ANALYSIS COMPLETE")
         print(f"{'='*70}")
-        print(f"\nDocuments analysed: {self.documents_analyzed}")
+        print(f"\nDocuments analysed: {self.documents_analysed}")
         print(f"Total cost: £{self.total_cost_gbp:.2f}\n")
     
     def export_detailed_excel(self) -> Path:
@@ -468,35 +545,21 @@ class EnhancedFolder69Reviewer:
                 'Document_Name': score.document_name,
                 'Date': score.date,
                 'Pages': score.pages,
-                
-                # Summary
                 'Document_Summary': score.document_summary,
-                
-                # Scores
                 'Overall_Value': f"{score.overall_value:.1f}",
                 'Category': score.category,
                 'Smoking_Gun_Score': f"{score.smoking_gun_score:.1f}",
                 'Concealment_Score': f"{score.concealment_score:.1f}",
                 'Contradiction_Score': f"{score.contradiction_score:.1f}",
-                
-                # Explanations (WHY each score)
                 'Smoking_Gun_Explanation': score.smoking_gun_explanation,
                 'Concealment_Explanation': score.concealment_explanation,
                 'Contradiction_Explanation': score.contradiction_explanation,
                 'Overall_Ranking_Explanation': score.overall_ranking_explanation,
                 'Critical_Factors': '\n'.join(score.critical_factors),
-                
-                # Litigation value
                 'Litigation_Value': score.litigation_value,
-                
-                # Tactical recommendations
                 'Cross_Exam_Questions': '\n'.join(score.cross_exam_questions),
-                
-                # Evidence
                 'Key_Quotes': '\n'.join([f'"{q}"' for q in score.key_quotes]),
                 'Related_Documents': '\n'.join(score.related_documents),
-                
-                # Metadata
                 'Analysis_Cost_GBP': f"£{score.cost_gbp:.4f}",
                 'Analysis_Timestamp': score.analysis_timestamp
             })
@@ -505,16 +568,16 @@ class EnhancedFolder69Reviewer:
         
         # Create filename with timestamp
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        output_file = self.results_dir / f"Folder_69_Enhanced_Analysis_{timestamp}.xlsx"
+        output_file = self.results_dir / f"Folder_69_Analysis_{timestamp}.xlsx"
         
         print(f"💾 Saving to: {output_file.name}")
         
         # Export with formatting
         with pd.ExcelWriter(output_file, engine='xlsxwriter') as writer:
-            df.to_excel(writer, sheet_name='Enhanced Analysis', index=False)
+            df.to_excel(writer, sheet_name='Analysis', index=False)
             
             workbook = writer.book
-            worksheet = writer.sheets['Enhanced Analysis']
+            worksheet = writer.sheets['Analysis']
             
             # Define formats
             header_fmt = workbook.add_format({
@@ -526,19 +589,12 @@ class EnhancedFolder69Reviewer:
                 'valign': 'vcenter'
             })
             
-            critical_fmt = workbook.add_format({
-                'bg_color': '#FF0000',
-                'font_color': 'white',
-                'bold': True
-            })
+            critical_fmt = workbook.add_format({'bg_color': '#FF0000', 'font_color': 'white', 'bold': True})
             high_fmt = workbook.add_format({'bg_color': '#FFC000'})
             medium_fmt = workbook.add_format({'bg_color': '#FFFF00'})
             low_fmt = workbook.add_format({'bg_color': '#92D050'})
             
-            wrap_fmt = workbook.add_format({
-                'text_wrap': True,
-                'valign': 'top'
-            })
+            wrap_fmt = workbook.add_format({'text_wrap': True, 'valign': 'top'})
             
             # Apply header format
             for col_num, value in enumerate(df.columns):
@@ -546,27 +602,13 @@ class EnhancedFolder69Reviewer:
             
             # Set column widths
             column_widths = {
-                'Rank': 6,
-                'Doc_ID': 15,
-                'Document_Name': 45,
-                'Date': 12,
-                'Pages': 8,
-                'Document_Summary': 70,
-                'Overall_Value': 12,
-                'Category': 12,
-                'Smoking_Gun_Score': 15,
-                'Concealment_Score': 15,
-                'Contradiction_Score': 15,
-                'Smoking_Gun_Explanation': 80,
-                'Concealment_Explanation': 80,
-                'Contradiction_Explanation': 80,
-                'Overall_Ranking_Explanation': 80,
-                'Critical_Factors': 60,
-                'Litigation_Value': 80,
-                'Cross_Exam_Questions': 70,
-                'Key_Quotes': 70,
-                'Related_Documents': 40,
-                'Analysis_Cost_GBP': 15,
+                'Rank': 6, 'Doc_ID': 15, 'Document_Name': 45, 'Date': 12, 'Pages': 8,
+                'Document_Summary': 70, 'Overall_Value': 12, 'Category': 12,
+                'Smoking_Gun_Score': 15, 'Concealment_Score': 15, 'Contradiction_Score': 15,
+                'Smoking_Gun_Explanation': 80, 'Concealment_Explanation': 80,
+                'Contradiction_Explanation': 80, 'Overall_Ranking_Explanation': 80,
+                'Critical_Factors': 60, 'Litigation_Value': 80, 'Cross_Exam_Questions': 70,
+                'Key_Quotes': 70, 'Related_Documents': 40, 'Analysis_Cost_GBP': 15,
                 'Analysis_Timestamp': 20
             }
             
@@ -574,27 +616,17 @@ class EnhancedFolder69Reviewer:
                 width = column_widths.get(col_name, 20)
                 worksheet.set_column(col_num, col_num, width)
             
-            # Apply category colors
+            # Apply category colours
             cat_col = df.columns.get_loc('Category')
             for row_num, cat in enumerate(df['Category'], start=1):
-                if cat == 'CRITICAL':
-                    fmt = critical_fmt
-                elif cat == 'HIGH':
-                    fmt = high_fmt
-                elif cat == 'MEDIUM':
-                    fmt = medium_fmt
-                else:
-                    fmt = low_fmt
-                
+                fmt = {'CRITICAL': critical_fmt, 'HIGH': high_fmt, 'MEDIUM': medium_fmt, 'LOW': low_fmt}.get(cat, medium_fmt)
                 worksheet.write(row_num, cat_col, cat, fmt)
             
             # Wrap text in explanation columns
             wrap_columns = [
-                'Document_Summary', 'Smoking_Gun_Explanation',
-                'Concealment_Explanation', 'Contradiction_Explanation',
-                'Overall_Ranking_Explanation', 'Critical_Factors',
-                'Litigation_Value', 'Cross_Exam_Questions',
-                'Key_Quotes', 'Related_Documents'
+                'Document_Summary', 'Smoking_Gun_Explanation', 'Concealment_Explanation',
+                'Contradiction_Explanation', 'Overall_Ranking_Explanation', 'Critical_Factors',
+                'Litigation_Value', 'Cross_Exam_Questions', 'Key_Quotes', 'Related_Documents'
             ]
             
             for col_name in wrap_columns:
@@ -605,24 +637,18 @@ class EnhancedFolder69Reviewer:
                         worksheet.write(row_num, col_num, cell_value, wrap_fmt)
         
         print(f"✅ Excel file created!\n")
-        print(f"📊 File contains:")
-        print(f"   • {len(df)} documents analysed")
-        print(f"   • {len(df.columns)} columns of detailed information")
-        print(f"   • Complete explanations for every score")
-        print(f"   • Litigation recommendations and tactics")
-        print(f"   • Key evidence quotes with citations\n")
         
-        # Print summary statistics
+        # Summary statistics
         critical_count = len([s for s in self.document_scores if s.category == 'CRITICAL'])
         high_count = len([s for s in self.document_scores if s.category == 'HIGH'])
         medium_count = len([s for s in self.document_scores if s.category == 'MEDIUM'])
         low_count = len([s for s in self.document_scores if s.category == 'LOW'])
         
         print(f"📈 Summary Statistics:")
-        print(f"   CRITICAL documents: {critical_count} ({critical_count/len(df)*100:.1f}%)")
-        print(f"   HIGH documents: {high_count} ({high_count/len(df)*100:.1f}%)")
-        print(f"   MEDIUM documents: {medium_count} ({medium_count/len(df)*100:.1f}%)")
-        print(f"   LOW documents: {low_count} ({low_count/len(df)*100:.1f}%)\n")
+        print(f"   CRITICAL: {critical_count} ({critical_count/len(df)*100:.1f}%)")
+        print(f"   HIGH: {high_count} ({high_count/len(df)*100:.1f}%)")
+        print(f"   MEDIUM: {medium_count} ({medium_count/len(df)*100:.1f}%)")
+        print(f"   LOW: {low_count} ({low_count/len(df)*100:.1f}%)\n")
         
         return output_file
     
@@ -719,44 +745,74 @@ British English. Be concise but specific. 2-3 pages max."""
     
     def run_complete_review(self, sample_size: Optional[int] = None):
         """
-        Run complete enhanced review pipeline
+        Run complete review pipeline
         
         Args:
             sample_size: If provided, only analyse N documents (for testing)
         """
         print("\n" + "="*70)
-        print("FOLDER 69 COMPLETE ENHANCED REVIEW")
+        print("FOLDER 69 COMPLETE REVIEW")
         print("="*70)
         print("\nThis system provides:")
-        print("  ✓ Document summaries")
+        print("  ✓ Document validation")
+        print("  ✓ Cost estimation")
+        print("  ✓ Checkpoint recovery")
         print("  ✓ Detailed scoring with explanations")
-        print("  ✓ Litigation value assessments")
-        print("  ✓ Tactical recommendations")
-        print("  ✓ Evidence quotes and citations")
+        print("  ✓ Litigation recommendations")
         print("  ✓ Complete Excel export\n")
         
-        # Step 1: Ingest documents
-        print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-        print("STEP 1: DOCUMENT INGESTION")
-        print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+        # Step 0: Cost estimation
+        print("━"*70)
+        print("STEP 0: COST ESTIMATION")
+        print("━"*70 + "\n")
+        
+        estimate = self.estimate_costs()
+        print(f"📊 Complete Analysis Estimate:")
+        print(f"   Documents: {estimate['documents']:,}")
+        print(f"   Total cost: £{estimate['total']['cost_gbp']:.2f}")
+        print(f"   Total time: {estimate['total']['time_hours']:.1f} hours")
+        print(f"\n   Breakdown:")
+        print(f"     Ingestion: £{estimate['ingestion']['cost_gbp']:.2f} ({estimate['ingestion']['time_minutes']:.0f} mins)")
+        print(f"     Analysis: £{estimate['analysis']['cost_gbp']:.2f} ({estimate['analysis']['time_minutes']:.0f} mins)")
+        
+        proceed = input("\nProceed? (y/n): ")
+        if proceed.lower() != 'y':
+            print("Cancelled.")
+            return
+        
+        # Step 1: Validation
+        print("\n" + "━"*70)
+        print("STEP 1: DOCUMENT VALIDATION")
+        print("━"*70 + "\n")
+        
+        valid, invalid, invalid_files = self.validate_documents()
+        
+        if invalid > 10:
+            print(f"\n⚠️  {invalid} invalid files found. Review and fix before proceeding.")
+            return
+        
+        # Step 2: Ingest documents
+        print("\n" + "━"*70)
+        print("STEP 2: DOCUMENT INGESTION")
+        print("━"*70 + "\n")
         self.ingest_documents()
         
-        # Step 2: Analyse all documents
-        print("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-        print("STEP 2: DETAILED DOCUMENT ANALYSIS")
-        print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+        # Step 3: Analyse all documents
+        print("\n" + "━"*70)
+        print("STEP 3: DETAILED DOCUMENT ANALYSIS")
+        print("━"*70 + "\n")
         self.analyse_all_documents(sample_size=sample_size)
         
-        # Step 3: Export to Excel
-        print("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-        print("STEP 3: EXCEL EXPORT")
-        print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+        # Step 4: Export to Excel
+        print("\n" + "━"*70)
+        print("STEP 4: EXCEL EXPORT")
+        print("━"*70 + "\n")
         excel_file = self.export_detailed_excel()
         
-        # Step 4: Executive summary
-        print("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-        print("STEP 4: EXECUTIVE SUMMARY")
-        print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+        # Step 5: Executive summary
+        print("\n" + "━"*70)
+        print("STEP 5: EXECUTIVE SUMMARY")
+        print("━"*70 + "\n")
         summary = self.generate_executive_summary()
         
         # Final output
@@ -764,7 +820,7 @@ British English. Be concise but specific. 2-3 pages max."""
         print("✅ COMPLETE REVIEW FINISHED")
         print("="*70)
         print(f"\n📊 Results:")
-        print(f"   Documents analysed: {self.documents_analyzed}")
+        print(f"   Documents analysed: {self.documents_analysed}")
         print(f"   Total cost: £{self.total_cost_gbp:.2f}")
         print(f"\n📂 Output files:")
         print(f"   Excel: {excel_file}")
@@ -774,9 +830,3 @@ British English. Be concise but specific. 2-3 pages max."""
         print("   2. Read detailed explanations for top documents")
         print("   3. Review executive summary")
         print("   4. Use litigation recommendations in your strategy\n")
-
-
-if __name__ == '__main__':
-    # For testing
-    print("Enhanced Folder 69 Reviewer loaded successfully!")
-    print("Use review_folder_69.py to run the analysis.")
