@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 # Imports
 from src.core.case_manager import CaseManager
-from src.intelligence.vector_store import VectorStore
+from src.intelligence.vector_store import IntelligentVectorStore
 from src.intelligence.query_engine import QueryEngine
 from src.intelligence.knowledge_graph import CumulativeKnowledgeGraph
 from anthropic import Anthropic
@@ -121,7 +121,7 @@ class LitigationAI:
         
         # Initialize vector store
         print("📚 Loading vector store...")
-        self.vector_store = VectorStore(
+        self.vector_store = IntelligentVectorStore(
             case_dir=self.active_case_dir,
             cohere_api_key=os.getenv('COHERE_API_KEY')  # Optional
         )
