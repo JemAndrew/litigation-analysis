@@ -11,6 +11,7 @@ Uses Claude's advanced capabilities:
 
 British English throughout.
 """
+from typing import Dict
 
 class BiblePrompts:
     """
@@ -76,57 +77,60 @@ Your goal: Build a Case Bible that gives Lismore's legal team TOTAL COMMAND of t
 
 Use British English exclusively: analyse, favour, colour, organisation, etc."""
     
-    def generate_bible_prompt(
+    def get_bible_generation_prompt(
         self,
-        pleadings: dict,
-        indices: dict,
-        late_disclosure_context: str,
-        tribunal_rulings: str
+        case_name: str,
+        claimant: str,
+        respondent: str,
+        tribunal: str,
+        pleadings: Dict[str, str],
+        indices: Dict[str, str],
+        witness_statements: str = "",
+        late_disclosure_context: str = "",
+        tribunal_rulings: str = ""
     ) -> str:
         """
-        Generate enhanced Bible building prompt
+        Build the complete Bible generation prompt
         
         Args:
-            pleadings: Dict with 'claim', 'defence', 'reply', 'rejoinder'
-            indices: Dict with exhibit indices
-            late_disclosure_context: Late disclosure sampling
-            tribunal_rulings: Tribunal rulings text
+            case_name: Full case name
+            claimant: Claimant name
+            respondent: Respondent name
+            tribunal: Tribunal name
+            pleadings: Dict with 'claim', 'defence', 'reply', etc.
+            indices: Dict with 'claimant', 'respondent' indices
+            witness_statements: Extracted trial witness statements
+            late_disclosure_context: Context about late disclosure
+            tribunal_rulings: Procedural orders/rulings
         
         Returns:
-            Complete prompt with XML structure requirements
+            Complete prompt for Bible generation
         """
         
-        prompt = f"""═══════════════════════════════════════════════════════════════════════
-CASE BIBLE GENERATION - LISMORE CAPITAL v PROCESS HOLDINGS
+        prompt = f"""You are building a **Case Bible** for the litigation case: **{case_name}**.
+
+⚖️ CASE CONTEXT:
+- Claimant: {claimant}
+- Respondent: {respondent}
+- Tribunal: {tribunal}
+
+═══════════════════════════════════════════════════════════════════════
+CRITICAL INSTRUCTIONS
 ═══════════════════════════════════════════════════════════════════════
 
-⚖️ YOU ARE ACTING FOR LISMORE CAPITAL AGAINST PROCESS HOLDINGS (PH)
+1. XML STRUCTURED OUTPUT (for claims, defences, quantum):
 
-Your mission: Extract EVERY piece of information from the pleadings and documents below, then build a comprehensive Case Bible that gives Lismore's legal team complete mastery of this case.
-
-═══════════════════════════════════════════════════════════════════════
-INSTRUCTIONS - READ CAREFULLY
-═══════════════════════════════════════════════════════════════════════
-
-OUTPUT FORMAT REQUIREMENTS:
-
-1. Use XML tags for ALL structured data (claims, evidence, quantum):
-
+Example claim structure:
 <claim id="1">
-  <title>Breach of Warranty 12.3 (Disclosure of Liabilities)</title>
-  <legal_basis>Breach of warranty under SPA Clause 12.3</legal_basis>
+  <legal_basis>Breach of Warranty 12.3</legal_basis>
+  <factual_allegation>PH failed to disclose £2.3M penalties [C-045]</factual_allegation>
   <quantum_gbp>2300000</quantum_gbp>
-  <facts>
-    <fact>PH warranted complete disclosure of liabilities [C-001, Warranty Schedule para 12.3]</fact>
-    <fact>PH failed to disclose £2.3M supplier penalties [C-045, para 3]</fact>
-    <fact>PH knew about penalties pre-SPA [C-091, Board Minutes dated 15 March 2024]</fact>
-  </facts>
   <evidence>
-    <smoking_gun id="C-045">Email from PH CFO discussing "withholding bad news from buyer"</smoking_gun>
-    <smoking_gun id="C-091">Board minutes proving PH discussed penalties 2 weeks before SPA</smoking_gun>
+    <smoking_gun id="C-045">Email dated 28 March 2024 proves PH knew about penalties</smoking_gun>
+    <smoking_gun id="C-087">Board minutes confirm decision to conceal</smoking_gun>
   </evidence>
-  <ph_defence>PH claims penalties were "immaterial" under SPA definition</ph_defence>
-  <lismore_rebuttal>£2.3M is 46% of target EBITDA - clearly material. PH's materiality argument fails.</lismore_rebuttal>
+  <ph_defence>PH argues penalties were immaterial</ph_defence>
+  <lismore_rebuttal>Immateriality fails - £2.3M is 15% of purchase price. PH's materiality argument fails.</lismore_rebuttal>
   <win_probability>0.75</win_probability>
   <strength>STRONG</strength>
   <key_risks>
@@ -171,11 +175,11 @@ Generate a Case Bible with these sections:
 6. EXHIBIT MAP (Index of ALL key exhibits by category)
 7. TIMELINE OF KEY EVENTS (Chronological, with sources)
 8. QUANTUM BREAKDOWN (With XML tags for each head)
-9. LATE DISCLOSURE ANALYSIS (Why did PH disclose 1,612 docs on 15 Sep 2025?)
+9. LATE DISCLOSURE ANALYSIS (Why did PH disclose documents late?)
 10. LEGAL FRAMEWORK (Applicable law, key precedents)
 11. PROCEDURAL HISTORY & KEY RULINGS
 12. STRATEGIC ASSESSMENT (Win probability, strongest arguments, risks)
-13. WITNESS & EXPERT EVIDENCE (Summary of statements)
+13. WITNESS & EXPERT EVIDENCE (Summary of statements with credibility)
 14. LEGAL AUTHORITIES REFERENCED (Note existence, don't extract)
 
 ═══════════════════════════════════════════════════════════════════════
@@ -191,7 +195,7 @@ SOURCE DOCUMENTS
 DOCUMENT: LISMORE'S STATEMENT OF CLAIM
 ───────────────────────────────────────────────────────────────────────
 
-{pleadings['claim'][:100000]}  
+{pleadings['claim'][:100000]}
 
 [Claim truncated if > 100K chars]
 
@@ -234,18 +238,60 @@ EXHIBIT INDICES (Critical for mapping exhibits to claims)
             for key, index_text in indices.items():
                 prompt += f"\n[{key.upper()} INDEX]\n{index_text[:50000]}\n"
         
+        # Add Trial Witness Statements
+        if witness_statements:
+            prompt += f"""
+───────────────────────────────────────────────────────────────────────
+TRIAL WITNESS STATEMENTS (21 KEY WITNESSES)
+───────────────────────────────────────────────────────────────────────
+
+These witnesses TESTIFIED at trial. Their credibility is CRITICAL.
+
+For each witness statement:
+- Identify KEY FACTS claimed by the witness
+- Note CONTRADICTIONS with documents (smoking guns for cross-exam)
+- Assess CREDIBILITY (0-10 score)
+- Identify CROSS-EXAMINATION ATTACK POINTS
+
+FORMAT FOR SECTION 13:
+
+**WITNESS: [Name]**
+- Role: [Position at PH/Lismore]
+- Statement dated: [Date]
+- Key facts claimed:
+  1. [Fact 1 with citation to para]
+  2. [Fact 2 with citation to para]
+- Contradictions with documents:
+  • Says "[Quote]" but [DOC_ID] proves [Opposite]
+  • Claims "didn't know X" but email [DOC_ID] shows knew on [Date]
+- Credibility: [X]/10
+- Cross-exam attack points:
+  1. "You stated in para X that... but DOC_Y proves..."
+  2. "How do you explain the contradiction between your statement and DOC_Z?"
+
+{witness_statements[:150000]}
+
+[Witness statements truncated if > 150K chars]
+
+"""
+        
         # Add Late Disclosure Context
-        prompt += f"""
+        if late_disclosure_context:
+            prompt += f"""
 ───────────────────────────────────────────────────────────────────────
-LATE DISCLOSURE (15 September 2025 - 1,612 documents)
+LATE DISCLOSURE (15 September 2025 - Critical Context)
 ───────────────────────────────────────────────────────────────────────
 
-⚠️ CRITICAL: PH disclosed 1,612 documents on 15 September 2025.
-This is 11 months AFTER filing their Defence (15 October 2024).
+⚠️ CRITICAL: PH disclosed documents on 15 September 2025.
 
-Analyse WHY this disclosure was so late. What are the strategic implications?
+Analyse for SECTION 9:
+- When was this disclosure (relative to Defence filing)?
+- Why was disclosure so late?
+- What does timing suggest about PH's conduct?
+- What are the strategic implications?
+- Does late timing indicate spoliation/concealment?
 
-{late_disclosure_context}
+{late_disclosure_context[:50000]}
 
 """
         
@@ -253,54 +299,59 @@ Analyse WHY this disclosure was so late. What are the strategic implications?
         if tribunal_rulings:
             prompt += f"""
 ───────────────────────────────────────────────────────────────────────
-TRIBUNAL RULINGS
+TRIBUNAL RULINGS & PROCEDURAL ORDERS
 ───────────────────────────────────────────────────────────────────────
 
-{tribunal_rulings}
+{tribunal_rulings[:50000]}
 
 """
         
         # Final instructions
         prompt += """
-═══════════════════════════════════════════════════════════════════════
-BEGIN CASE BIBLE GENERATION
-═══════════════════════════════════════════════════════════════════════
+───────────────────────────────────────────────────────────────────────
+OUTPUT REQUIREMENTS
+───────────────────────────────────────────────────────────────────────
 
-Using your extended thinking, analyse all documents above and generate the complete Case Bible following the structure and XML requirements specified.
+- Write in clear, professional British English
+- Be comprehensive but concise
+- Use bullet points and structured formatting
+- Target length: 40-60 pages total
+- This will be read by Claude for EVERY future query, so include everything essential
+- DO NOT include irrelevant details that won't help future analysis
 
-Remember:
-✅ Use XML tags for structured data
-✅ Cite sources for EVERY fact [DOC_ID, location]
-✅ Favour Lismore's position (you represent them!)
-✅ Be forensically precise (exact dates, amounts, clauses)
-✅ Identify smoking guns aggressively
-✅ Attack PH's credibility
+BEGIN THE CASE BIBLE NOW:"""
 
-Begin with: "═══════════════════════════════════════════════════════════════════════"
-"""
-        
         return prompt
 
 
-def main():
-    """Test the enhanced prompts"""
-    
-    prompts = BiblePrompts()
-    
-    print("="*70)
-    print("ENHANCED BIBLE PROMPTS")
-    print("="*70)
-    
-    print("\nSYSTEM PROMPT:")
-    print(prompts.get_system_prompt()[:500] + "...")
-    
-    print("\n✅ Enhanced with:")
-    print("  • Strong role definition (Senior Barrister)")
-    print("  • XML tag requirements")
-    print("  • Mandatory citation rules")
-    print("  • Extended thinking instructions")
-    print("  • Partisan framing (pro-Lismore)")
+# Singleton instance
+_prompts = BiblePrompts()
 
+# Module-level functions for backward compatibility
+def get_system_prompt() -> str:
+    """Get system prompt"""
+    return _prompts.get_system_prompt()
 
-if __name__ == '__main__':
-    main()
+def get_bible_generation_prompt(
+    case_name: str,
+    claimant: str,
+    respondent: str,
+    tribunal: str,
+    pleadings: Dict[str, str],
+    indices: Dict[str, str],
+    witness_statements: str = "",
+    late_disclosure_context: str = "",
+    tribunal_rulings: str = ""
+) -> str:
+    """Get Bible generation prompt"""
+    return _prompts.get_bible_generation_prompt(
+        case_name=case_name,
+        claimant=claimant,
+        respondent=respondent,
+        tribunal=tribunal,
+        pleadings=pleadings,
+        indices=indices,
+        witness_statements=witness_statements,
+        late_disclosure_context=late_disclosure_context,
+        tribunal_rulings=tribunal_rulings
+    )

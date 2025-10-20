@@ -46,6 +46,27 @@ class FolderClassifier:
     - SKIP: Duplicates, other proceedings, archives
     """
     
+    # ═══════════════════════════════════════════════════════════════
+    # BIBLE-CRITICAL FOLDERS (Explicit List for Lismore v PH)
+    # ═══════════════════════════════════════════════════════════════
+    BIBLE_CRITICAL_FOLDERS = [
+        r'^4[- ].*PO.*1',               # 4- PO1
+        r'^5[- ].*[Rr]equest',          # 5- Request for Arbitration
+        r'^6[- ].*[Rr]esponse',         # 6- Responses
+        r'^8[- ].*PO.*2',               # 8- PO2
+        r'^25[- ].*LCIA',               # 25- LCIA Rules
+        r'^29[- ].*[Cc]laim',           # 29- Statement of Claim
+        r'^29[- ].*[Ee]xpert',          # 29- Expert Opinion
+        r'^35[- ].*[Dd]efence',         # 35- Statement of Defence
+        r'^35[- ].*[Cc]onsolidated',    # 35- Consolidated Index
+        r'^51[- ].*[Hh]yperlink',       # 51- Hyperlinked Index
+        r'^52[- ].*[Cc]onsolidated',    # 52- Consolidated Index
+        r'^55[- ].*[Pp]roduction',      # 55- Document Production
+        r'^57[- ].*[Dd]isclosure',      # 57- Application re Disclosure
+        r'^61[- ].*[Ww]itness',         # 61- Witness Statements
+        r'^69[- ].*([Ll]ate|15.*[Ss]ept|[Ss]eptember.*2025)', # 69- Late Disclosure
+    ]
+    
     # Pattern definitions for classification
     PLEADING_PATTERNS = [
         r'claim',
@@ -149,6 +170,21 @@ class FolderClassifier:
         """
         self.root_path = Path(root_path)
         
+    def _is_bible_critical_folder(self, folder_name: str) -> bool:
+        """
+        Check if folder matches Bible-critical patterns
+        
+        Args:
+            folder_name: Name of folder to check
+            
+        Returns:
+            True if folder is explicitly required for Bible
+        """
+        for pattern in self.BIBLE_CRITICAL_FOLDERS:
+            if re.search(pattern, folder_name, re.IGNORECASE):
+                return True
+        return False
+    
     def classify_all_folders(self) -> List[FolderClassification]:
         """
         Classify all top-level folders
@@ -188,7 +224,7 @@ class FolderClassifier:
     
     def _classify_folder(self, folder: Path) -> FolderClassification:
         """
-        Classify a single folder
+        Classify a folder by importance
         
         Args:
             folder: Folder path to classify
@@ -197,10 +233,39 @@ class FolderClassifier:
             FolderClassification object
         """
         
-        name = folder.name.lower()
+        name = folder.name
         file_count = sum(1 for _ in folder.rglob('*') if _.is_file())
         
-        # Check OTHER PROCEEDINGS first (separate cases - skip entirely)
+        # ═══════════════════════════════════════════════════════════
+        # PRIORITY 1: Check Bible-critical folders FIRST
+        # ═══════════════════════════════════════════════════════════
+        if self._is_bible_critical_folder(name):
+            return FolderClassification(
+                path=folder,
+                name=name,
+                priority='CRITICAL',
+                category='bible_essential',
+                file_count=file_count,
+                reason='📖 Explicitly required for Case Bible',
+                should_read_for_bible=True,
+                should_ingest_to_vector=True
+            )
+        
+        # Check SKIP patterns first
+        for pattern in self.SKIP_PATTERNS:
+            if re.search(pattern, name, re.IGNORECASE):
+                return FolderClassification(
+                    path=folder,
+                    name=folder.name,
+                    priority='SKIP',
+                    category='duplicate',
+                    file_count=file_count,
+                    reason='Duplicate/archive folder',
+                    should_read_for_bible=False,
+                    should_ingest_to_vector=False
+                )
+        
+        # Check OTHER PROCEEDINGS (context only)
         for pattern in self.OTHER_PROCEEDINGS_PATTERNS:
             if re.search(pattern, name, re.IGNORECASE):
                 return FolderClassification(
@@ -209,26 +274,12 @@ class FolderClassifier:
                     priority='SKIP',
                     category='other_proceedings',
                     file_count=file_count,
-                    reason=f'Separate case/proceeding - not relevant to Lismore v PH',
+                    reason='Other arbitration/proceeding (not this case)',
                     should_read_for_bible=False,
                     should_ingest_to_vector=False
                 )
         
-        # Check SKIP patterns (duplicates/archives)
-        for pattern in self.SKIP_PATTERNS:
-            if re.search(pattern, name, re.IGNORECASE):
-                return FolderClassification(
-                    path=folder,
-                    name=folder.name,
-                    priority='SKIP',
-                    category='duplicate_archive',
-                    file_count=file_count,
-                    reason=f'Matches skip pattern: {pattern}',
-                    should_read_for_bible=False,
-                    should_ingest_to_vector=False
-                )
-        
-        # Check LEGAL AUTHORITIES (note existence, don't extract)
+        # Check LEGAL AUTHORITIES (note but don't extract)
         for pattern in self.LEGAL_AUTHORITIES_PATTERNS:
             if re.search(pattern, name, re.IGNORECASE):
                 return FolderClassification(
@@ -242,7 +293,7 @@ class FolderClassifier:
                     should_ingest_to_vector=False  # Don't need in vector store
                 )
         
-        # Check INDICES (HIGH priority - before pleadings)
+        # Check INDICES (HIGH priority)
         for pattern in self.INDEX_PATTERNS:
             if re.search(pattern, name, re.IGNORECASE):
                 return FolderClassification(
@@ -256,8 +307,47 @@ class FolderClassifier:
                     should_ingest_to_vector=False
                 )
         
-        # Check CORE PLEADINGS ONLY (CRITICAL priority)
-        # Very specific patterns to avoid catching procedural responses
+        # Check WITNESS STATEMENTS (HIGH priority)
+        for pattern in self.WITNESS_PATTERNS:
+            if re.search(pattern, name, re.IGNORECASE):
+                # Check if this is the Trial Witness Statements subfolder
+                if 'trial' in name.lower():
+                    return FolderClassification(
+                        path=folder,
+                        name=folder.name,
+                        priority='CRITICAL',
+                        category='trial_witnesses',
+                        file_count=file_count,
+                        reason='⭐ Trial witness statements (testified at hearing)',
+                        should_read_for_bible=True,
+                        should_ingest_to_vector=True
+                    )
+                else:
+                    return FolderClassification(
+                        path=folder,
+                        name=folder.name,
+                        priority='HIGH',
+                        category='witness_statements',
+                        file_count=file_count,
+                        reason='Witness statements (may not have testified)',
+                        should_read_for_bible=False,
+                        should_ingest_to_vector=True
+                    )
+        
+        # Check LATE DISCLOSURE (HIGH priority - smoking guns!)
+        if re.search(r'(69|late.*disclosure|15.*september.*2025)', name, re.IGNORECASE):
+            return FolderClassification(
+                path=folder,
+                name=folder.name,
+                priority='HIGH',
+                category='late_disclosure',
+                file_count=file_count,
+                reason='⚠️ Late disclosure - likely smoking guns!',
+                should_read_for_bible=True,
+                should_ingest_to_vector=True
+            )
+        
+        # Check CORE PLEADINGS (CRITICAL priority)
         core_pleading_patterns = [
             r'\bstatement\s+of\s+claim\b',
             r'\bstatement\s+of\s+defence\b',
@@ -270,104 +360,16 @@ class FolderClassifier:
                 if re.search(r'\bresponse\s+to\b', name, re.IGNORECASE):
                     continue
                 
-                # Exclude if it's "shared with counsel" (likely duplicate)
-                if 'shared with counsel' in name:
-                    return FolderClassification(
-                        path=folder,
-                        name=folder.name,
-                        priority='MEDIUM',
-                        category='duplicate_pleading',
-                        file_count=file_count,
-                        reason='Duplicate - "Shared with Counsel" version',
-                        should_read_for_bible=False,
-                        should_ingest_to_vector=False
-                    )
-                
-                # Exclude drafts
-                if any(re.search(p, name, re.IGNORECASE) for p in self.DRAFT_PATTERNS):
-                    return FolderClassification(
-                        path=folder,
-                        name=folder.name,
-                        priority='SKIP',
-                        category='draft_pleading',
-                        file_count=file_count,
-                        reason='Draft/historical version',
-                        should_read_for_bible=False,
-                        should_ingest_to_vector=False
-                    )
-                
-                # Determine which core pleading it is
-                if 'statement of claim' in name:
-                    description = 'Statement of Claim'
-                elif 'statement of defence' in name:
-                    description = 'Statement of Defence'
-                elif 'reply' in name and 'rejoinder' in name:
-                    description = 'Reply and Rejoinder'
-                else:
-                    description = 'Core Pleading'
-                
                 return FolderClassification(
                     path=folder,
                     name=folder.name,
                     priority='CRITICAL',
-                    category='pleading',
+                    category='pleadings',
                     file_count=file_count,
-                    reason=f'Core pleading: {description}',
+                    reason='Core pleading document',
                     should_read_for_bible=True,
                     should_ingest_to_vector=True
                 )
-        
-        # Procedural responses/objections (MEDIUM, not CRITICAL)
-        procedural_response_patterns = [
-            r'response\s+to.*stay',
-            r'response\s+to.*security',
-            r'objections?\s+to',
-            r'stern\s+schedule',
-            r'responses?\s+to.*disclosure',
-            r'responses?\s+to.*production',
-            r'list\s+of.*docs',
-            r'exhibits?\s+from.*response',
-        ]
-        
-        for pattern in procedural_response_patterns:
-            if re.search(pattern, name, re.IGNORECASE):
-                return FolderClassification(
-                    path=folder,
-                    name=folder.name,
-                    priority='MEDIUM',
-                    category='procedural_response',
-                    file_count=file_count,
-                    reason=f'Procedural response/objection (not core pleading)',
-                    should_read_for_bible=False,
-                    should_ingest_to_vector=True
-                )
-        
-        # Check WITNESS STATEMENTS (HIGH priority)
-        for pattern in self.WITNESS_PATTERNS:
-            if re.search(pattern, name, re.IGNORECASE):
-                return FolderClassification(
-                    path=folder,
-                    name=folder.name,
-                    priority='HIGH',
-                    category='witness',
-                    file_count=file_count,
-                    reason='Witness/expert evidence',
-                    should_read_for_bible=True,
-                    should_ingest_to_vector=True
-                )
-        
-        # Check LATE DISCLOSURE (HIGH priority - smoking guns!)
-        if re.search(r'(69|late.*disclosure|15.*september.*2025)', name, re.IGNORECASE):
-            return FolderClassification(
-                path=folder,
-                name=folder.name,
-                priority='HIGH',
-                category='late_disclosure',
-                file_count=file_count,
-                reason='⚠️  Late disclosure - likely smoking guns!',
-                should_read_for_bible=True,
-                should_ingest_to_vector=True
-            )
         
         # Check PROCEDURAL (MEDIUM priority)
         for pattern in self.PROCEDURAL_PATTERNS:
@@ -411,20 +413,20 @@ class FolderClassifier:
     
     def get_folders_for_bible(self) -> Dict[str, List[FolderClassification]]:
         """
-        Get folders organised by what to read for Case Bible
+        Get folders organised by priority for Bible building
         
         Returns:
-            Dict with keys: 'critical', 'high', 'medium', 'legal_authorities', 'skip'
+            Dict with keys: critical, high, medium, legal_authorities, skip
         """
         
         all_classifications = self.classify_all_folders()
         
         organised = {
-            'critical': [],           # MUST read in full
-            'high': [],               # SHOULD read (full or sample)
-            'medium': [],             # Summary only
-            'legal_authorities': [],  # Note existence only
-            'skip': []                # Don't read
+            'critical': [],
+            'high': [],
+            'medium': [],
+            'legal_authorities': [],
+            'skip': []
         }
         
         for classification in all_classifications:
@@ -443,20 +445,19 @@ class FolderClassifier:
     
     def _get_priority_emoji(self, priority: str) -> str:
         """Get emoji for priority level"""
-        emojis = {
+        return {
             'CRITICAL': '🔥',
             'HIGH': '⭐',
             'MEDIUM': '📋',
-            'LOW': '📚',  # Legal authorities
+            'LOW': '📚',
             'SKIP': '❌'
-        }
-        return emojis.get(priority, '📁')
+        }.get(priority, '❓')
     
-    def _print_summary(self, classifications: List[FolderClassification]):
+    def _print_summary(self, classifications: List[FolderClassification]) -> None:
         """Print classification summary"""
         
-        print(f"{'='*70}")
-        print("SUMMARY")
+        print(f"\n{'='*70}")
+        print("CLASSIFICATION SUMMARY")
         print(f"{'='*70}\n")
         
         # Count by priority
@@ -495,15 +496,17 @@ class FolderClassifier:
         # File count estimates
         total_files = sum(c.file_count for c in classifications)
         bible_files = sum(c.file_count for c in bible_folders)
+        vector_files = sum(c.file_count for c in vector_folders)
         other_proc_files = sum(c.file_count for c in other_proc)
         legal_auth_files = sum(c.file_count for c in legal_auth)
         
         print(f"\nFILE COUNT ESTIMATES:")
         print(f"   Total files: {total_files:,}")
         print(f"   For Bible: {bible_files:,} ({bible_files/total_files*100:.1f}%)")
+        print(f"   For Vector Store: {vector_files:,} ({vector_files/total_files*100:.1f}%)")
         print(f"   Legal authorities (note only): {legal_auth_files:,}")
         print(f"   Other proceedings (skip): {other_proc_files:,}")
-        print(f"   Saved by filtering: {total_files - bible_files:,} files\n")
+        print(f"   Saved by filtering: {total_files - bible_files:,} files from Bible\n")
         
         print(f"{'='*70}\n")
 

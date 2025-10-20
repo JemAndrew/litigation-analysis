@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Claude API Client - Anthropic API Wrapper
+Claude API Client - Anthropic API Wrapper with Accurate Token Counting
 
 Handles:
 - API calls with prompt caching
 - Extended thinking support
 - Retry logic with exponential backoff
+- ACCURATE token counting via Anthropic API
 - Cost tracking
 - Error handling
 
@@ -42,10 +43,11 @@ class ClaudeClient:
     - Prompt caching (90% cost reduction)
     - Extended thinking
     - Retry logic
+    - Accurate token counting
     - Cost tracking
     """
     
-    # Pricing (as of Oct 2024)
+    # Pricing (as of January 2025)
     PRICING = {
         'claude-sonnet-4-5-20250929': {
             'input': 0.000003,      # $3 per 1M tokens
@@ -163,102 +165,38 @@ class ClaudeClient:
                     print(f"   Cache read tokens: {usage.cache_read_input_tokens:,} "
                           f"(💰 {savings_pct:.0f}% cost saved!)")
                 
-                print(f"   This call: ${usage.total_cost_usd:.4f} (£{usage.total_cost_gbp:.4f})")
-                print(f"   Total session: £{self.total_cost_gbp:.2f} ({self.call_count} calls)")
+                print(f"   This call: £{usage.total_cost_gbp:.4f}")
+                print(f"   Session total: £{self.total_cost_gbp:.2f}")
                 
-                # Extract text content
-                text_content = ""
-                thinking_content = ""
-                
+                # Extract content
+                content = ""
                 for block in response.content:
                     if block.type == 'text':
-                        text_content += block.text
-                    elif block.type == 'thinking':
-                        thinking_content += block.thinking
+                        content += block.text
                 
                 return {
-                    'content': text_content,
-                    'thinking': thinking_content,
+                    'content': content,
                     'usage': usage,
-                    'raw_response': response
+                    'response': response
                 }
-            
+                
             except RateLimitError as e:
-                if attempt < max_retries - 1:
-                    wait_time = 2 ** attempt  # Exponential backoff
-                    print(f"   ⚠️  Rate limit hit. Retrying in {wait_time}s...")
-                    time.sleep(wait_time)
-                else:
-                    raise Exception(f"Rate limit exceeded after {max_retries} retries") from e
-            
+                wait_time = 2 ** attempt  # Exponential backoff
+                print(f"⚠️  Rate limit hit. Waiting {wait_time}s before retry {attempt+1}/{max_retries}...")
+                time.sleep(wait_time)
+                
             except APITimeoutError as e:
-                if attempt < max_retries - 1:
-                    wait_time = 2 ** attempt
-                    print(f"   ⚠️  Timeout. Retrying in {wait_time}s...")
-                    time.sleep(wait_time)
-                else:
-                    raise Exception(f"API timeout after {max_retries} retries") from e
-            
+                print(f"⚠️  API timeout. Retrying {attempt+1}/{max_retries}...")
+                time.sleep(2)
+                
             except APIError as e:
-                # For other API errors, don't retry
-                raise Exception(f"API error: {e}") from e
+                print(f"❌ API error: {e}")
+                if attempt == max_retries - 1:
+                    raise
+                time.sleep(2)
+        
+        raise Exception(f"Failed after {max_retries} retries")
     
-    def count_tokens(self, text: str) -> int:
-        """
-        Count tokens in text using Anthropic's token counting
-        
-        Args:
-            text: Text to count
-        
-        Returns:
-            Token count
-        """
-        
-        # Use Anthropic's count_tokens method
-        response = self.client.count_tokens(text)
-        return response
-
-
-    def estimate_cost_with_token_count(
-        self,
-        text: str,
-        output_tokens: int = 4000,
-        model: str = 'claude-sonnet-4-5-20250929'
-    ) -> Dict[str, Any]:
-        """
-        Estimate cost with precise token counting
-        
-        Args:
-            text: Input text
-            output_tokens: Expected output tokens
-            model: Model to use
-        
-        Returns:
-            Dict with costs and accurate token count
-        """
-        
-        # Get accurate token count
-        try:
-            input_tokens = self.count_tokens(text)
-        except:
-            # Fallback to estimate if API fails
-            input_tokens = len(text) // 4
-        
-        pricing = self.PRICING.get(model, self.PRICING['claude-sonnet-4-5-20250929'])
-        
-        input_cost = input_tokens * pricing['input']
-        output_cost = output_tokens * pricing['output']
-        
-        total_usd = input_cost + output_cost
-        total_gbp = total_usd * self.USD_TO_GBP
-        
-        return {
-            'usd': total_usd,
-            'gbp': total_gbp,
-            'input_tokens': input_tokens,
-            'output_tokens': output_tokens
-        }
-
     def _calculate_usage(self, response: Any, model: str) -> APIUsage:
         """
         Calculate costs from API response
@@ -313,26 +251,21 @@ class ClaudeClient:
         thinking: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
-        Create message with cached system context (Case Bible pattern)
-        
-        This is the optimal pattern for Case Bible queries:
-        - System prompt (cached)
-        - Case Bible context (cached)
-        - User message (not cached - changes each time)
+        Create message with cached context (e.g., Case Bible)
         
         Args:
             user_message: The user's query
-            system_prompt: System instructions (will be cached)
-            cached_context: Case Bible or other context (will be cached)
+            system_prompt: System prompt (cached)
+            cached_context: Large context to cache (e.g., Bible)
             model: Model to use
-            max_tokens: Max output tokens
+            max_tokens: Maximum output tokens
             thinking: Extended thinking config
         
         Returns:
             Response dict
         """
         
-        # Build system prompt with cache control
+        # Build system with caching
         system = [
             {
                 'type': 'text',
@@ -346,13 +279,10 @@ class ClaudeClient:
             }
         ]
         
-        # Build messages
-        messages = [
-            {
-                'role': 'user',
-                'content': user_message
-            }
-        ]
+        messages = [{
+            'role': 'user',
+            'content': user_message
+        }]
         
         return self.create_message(
             messages=messages,
@@ -362,21 +292,79 @@ class ClaudeClient:
             thinking=thinking
         )
     
-    def estimate_cost(
-        self,
-        input_text: str,
-        output_tokens: int = 4000,
-        cached_tokens: int = 0,
-        model: str = 'claude-sonnet-4-5-20250929'
-    ) -> Dict[str, float]:
+    def count_tokens(self, text: str) -> int:
         """
-        Estimate cost before making API call
+        Count tokens using Anthropic's official counter
         
         Args:
-            input_text: Input text to estimate tokens
+            text: Text to count tokens for
+        
+        Returns:
+            Accurate token count
+        """
+        
+        return self.client.count_tokens(text)
+    
+    def estimate_cost_with_token_count(
+        self,
+        text: str,
+        output_tokens: int,
+        model: str = 'claude-sonnet-4-5-20250929',
+        cached_tokens: int = 0
+    ) -> Dict[str, Any]:
+        """
+        Estimate cost using Anthropic's ACCURATE token counter
+        
+        Args:
+            text: Input text
             output_tokens: Expected output tokens
-            cached_tokens: How many tokens will be cached
             model: Model to use
+            cached_tokens: Tokens that will be cached (if any)
+        
+        Returns:
+            Dict with accurate token count and cost
+        """
+        
+        # Use Anthropic's official token counter
+        input_tokens = self.count_tokens(text)
+        
+        pricing = self.PRICING.get(model, self.PRICING['claude-sonnet-4-5-20250929'])
+        
+        # Calculate costs
+        input_cost_usd = input_tokens * pricing['input']
+        output_cost_usd = output_tokens * pricing['output']
+        
+        # If using cache
+        cache_read_cost_usd = 0.0
+        if cached_tokens > 0:
+            cache_read_cost_usd = cached_tokens * pricing['cache_read']
+        
+        total_usd = input_cost_usd + output_cost_usd + cache_read_cost_usd
+        total_gbp = total_usd * self.USD_TO_GBP
+        
+        return {
+            'input_tokens': input_tokens,
+            'output_tokens': output_tokens,
+            'cached_tokens': cached_tokens,
+            'usd': total_usd,
+            'gbp': total_gbp
+        }
+    
+    def estimate_cost_simple(
+        self,
+        input_text: str,
+        output_tokens: int,
+        model: str = 'claude-sonnet-4-5-20250929',
+        cached_tokens: int = 0
+    ) -> Dict[str, Any]:
+        """
+        Simple cost estimation (fallback if API unavailable)
+        
+        Args:
+            input_text: Input text
+            output_tokens: Expected output tokens
+            model: Model to use
+            cached_tokens: Tokens that will be cached
         
         Returns:
             Dict with 'usd' and 'gbp' costs
@@ -480,13 +468,26 @@ def test_client():
     
     print(f"\nResponse: {response['content']}")
     
-    # Show session stats
+    # Test 4: Token counting
+    print("\n📝 TEST 4: Accurate token counting")
+    
+    sample_text = """
+    This is a sample legal document.
+    Lismore Capital Limited v Process Holdings Limited.
+    LCIA Arbitration.
+    """
+    
+    token_count = client.count_tokens(sample_text)
+    print(f"\nText: {sample_text[:100]}...")
+    print(f"Token count: {token_count}")
+    
+    # Session stats
     print("\n" + "="*70)
     print("SESSION STATISTICS")
     print("="*70)
     
     stats = client.get_session_stats()
-    print(f"\nTotal calls: {stats['total_calls']}")
+    print(f"\nTotal API calls: {stats['total_calls']}")
     print(f"Total cost: £{stats['total_cost_gbp']:.4f}")
     print(f"Average per call: £{stats['avg_cost_per_call_gbp']:.4f}")
 

@@ -1,526 +1,446 @@
 #!/usr/bin/env python3
 """
-Document Selector - Master Document Detection
+Document Selector - Smart Document Selection for Bible Building
 
-Intelligently selects master documents within folders.
-Skips drafts, historical versions, and duplicates.
+Selects master documents and skips drafts/duplicates.
+Handles Excel files intelligently (critical indices vs drafts).
 
-Handles:
-- Case-specific evidence (extract full text)
-- Legal authorities (list only, don't extract)
-- Other proceedings (note only)
-
-Strategy:
-1. Look for "As Filed" / "Final" subfolders first
-2. Skip "Draft" / "Historical" / "Archive" subfolders
-3. Find master version by filename patterns
-4. Return only critical documents to extract
+CRITICAL FIX: Only extracts TOP-LEVEL files from pleadings folders,
+              skips exhibit subfolders (C-1, C-2, FA-1, etc.)
 
 British English throughout.
 """
 
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import Dict, List, Tuple
 from dataclasses import dataclass
 import re
 
 
 @dataclass
-class SelectedDocument:
-    """A selected master document"""
+class Document:
+    """Document selection result"""
     path: Path
     filename: str
     folder_name: str
-    category: str  # pleading, index, witness, legal_authority, etc.
-    reason: str  # Why this was selected
     size_mb: float
-    extract_type: str  # 'full', 'list', 'skip'
+    extract_type: str  # 'full', 'summary', 'list'
+    priority: int  # 1-10 (10 = highest)
+    reason: str  # Why selected/skipped
 
 
 class DocumentSelector:
     """
-    Selects master documents within folders
+    Selects documents intelligently for Bible building
     
-    Filters out:
-    - Draft versions
-    - Historical versions
-    - Archive copies
-    - Duplicate documents
-    
-    Treats differently:
-    - Case evidence (extract full text)
-    - Legal authorities (list only)
-    - Other proceedings (note only)
-    
-    Returns only the final, filed versions.
+    Strategy:
+    - Full extraction: Core pleadings, indices, key witness statements
+    - Summary only: Procedural orders, large disclosure sets
+    - List only: Legal authorities (note existence, don't extract)
+    - Skip: Drafts, duplicates, archives, EXHIBIT SUBFOLDERS
     """
     
-    # Subfolders to prioritise (master versions)
-    PRIORITY_SUBFOLDERS = [
-        r'as\s+filed',
-        r'final',
-        r'signed',
-        r'executed',
-        r'filed',
+    # File extensions
+    PDF_EXTENSIONS = ['.pdf']
+    WORD_EXTENSIONS = ['.doc', '.docx']
+    EXCEL_EXTENSIONS = ['.xlsx', '.xls', '.xlsm']
+    EXTRACTABLE_EXTENSIONS = PDF_EXTENSIONS + WORD_EXTENSIONS + EXCEL_EXTENSIONS
+    
+    # ═══════════════════════════════════════════════════════════════
+    # CRITICAL: Exhibit subfolder patterns (SKIP THESE)
+    # ═══════════════════════════════════════════════════════════════
+    EXHIBIT_SUBFOLDER_PATTERNS = [
+        r'claimant.*factual.*exhibit',
+        r'claimant.*exhibit',
+        r'respondent.*exhibit',
+        r'factual.*exhibit',
+        r'expert.*exhibit',
+        r'legal.*authorit.*exhibit',
+        r'exhibit.*bundle',
+        r'^exhibits?$',  # Folder literally named "Exhibits"
     ]
     
-    # Subfolders to skip (not master versions)
-    SKIP_SUBFOLDERS = [
-        r'draft',
-        r'historical',
-        r'historic',
-        r'archive',
-        r'version',
-        r'working',
-        r'wip',
-        r'do\s+not\s+use',
-        r'old',
-        r'backup',
-        r'temp',
+    # ═══════════════════════════════════════════════════════════════
+    # CRITICAL EXCEL FILES (Never Skip Even if Named "Draft")
+    # ═══════════════════════════════════════════════════════════════
+    CRITICAL_EXCEL_PATTERNS = [
+        r'trial.*bundle.*index',
+        r'list.*documents.*received',
+        r'consolidated.*index',
+        r'hyperlinked.*index',
+        r'exhibit.*index',
+        r'document.*index',
     ]
     
-    # Filename patterns to prioritise
-    PRIORITY_FILENAMES = [
-        r'final',
-        r'signed',
-        r'as\s+filed',
-        r'filed',
+    # Draft patterns (usually skip these)
+    DRAFT_PATTERNS = [
+        r'\bdraft\b',
+        r'\bv\d+\b',  # v1, v2, etc.
+        r'\bversion\s+\d+\b',
+        r'\bworking\b',
+        r'\bwip\b',
+        r'^\d{2}\.\d{2}\.\d{2}',  # Date prefix like "01.02.24 Draft.pdf"
     ]
     
-    # Filename patterns to skip
-    SKIP_FILENAMES = [
-        r'draft',
-        r'redline',
-        r'track.*change',
-        r'version\s+\d+',
-        r'v\d+',
-        r'copy\s+of',
-        r'backup',
-        r'\(conflicted\)',
-        r'\~\$',  # Word temp files
-    ]
-    
-    # File extensions to include
-    VALID_EXTENSIONS = {
-        '.pdf', '.docx', '.doc', '.xlsx', '.xls'
-    }
+    # Individual exhibit file patterns (skip these)
+    INDIVIDUAL_EXHIBIT_PATTERNS = [
+        r'^C-\d+\.pdf
     
     def __init__(self):
         """Initialise document selector"""
         pass
     
-    def select_documents_from_folder(
-        self, 
-        folder: Path, 
-        category: str,
-        max_documents: int = 10,
-        extract_type: str = 'full'
-    ) -> List[SelectedDocument]:
+    def _is_exhibit_subfolder(self, path: Path, parent_folder: Path) -> bool:
         """
-        Select master documents from a folder
+        Check if path is inside an exhibit subfolder
         
         Args:
-            folder: Folder to scan
-            category: Category (pleading, index, witness, legal_authority, etc.)
-            max_documents: Maximum documents to return
-            extract_type: 'full' (extract text), 'list' (list only), 'skip'
-        
+            path: File path to check
+            parent_folder: Parent folder path
+            
         Returns:
-            List of SelectedDocument objects
+            True if file is inside an exhibit subfolder
         """
+        # Get relative path from parent
+        try:
+            rel_path = path.relative_to(parent_folder)
+        except ValueError:
+            return False
         
-        print(f"\n📂 Scanning: {folder.name}")
-        
-        if not folder.exists():
-            print(f"   ❌ Folder does not exist")
-            return []
-        
-        # For legal authorities, just list the files (don't extract)
-        if category == 'legal_authorities':
-            print(f"   📚 Legal authorities - listing only (not extracting)")
-            return self._list_legal_authorities(folder, max_documents)
-        
-        # Strategy 1: Look for "As Filed" or "Final" subfolder
-        priority_subfolder = self._find_priority_subfolder(folder)
-        
-        if priority_subfolder:
-            print(f"   ✅ Found priority subfolder: {priority_subfolder.name}")
-            return self._select_from_subfolder(
-                priority_subfolder, 
-                folder.name,
-                category,
-                max_documents,
-                extract_type
-            )
-        
-        # Strategy 2: Scan all files, skip draft subfolders
-        print(f"   🔍 No priority subfolder - scanning all files")
-        return self._select_from_all_files(
-            folder,
-            category,
-            max_documents,
-            extract_type
-        )
-    
-    def _list_legal_authorities(
-        self,
-        folder: Path,
-        max_documents: int
-    ) -> List[SelectedDocument]:
-        """
-        List legal authority documents without extracting
-        
-        Args:
-            folder: Folder containing legal authorities
-            max_documents: Max to list
-        
-        Returns:
-            List of SelectedDocument with extract_type='list'
-        """
-        
-        files = []
-        
-        for file_path in folder.rglob('*'):
-            if not file_path.is_file():
-                continue
-            
-            if file_path.suffix.lower() not in self.VALID_EXTENSIONS:
-                continue
-            
-            files.append(file_path)
-        
-        # Sort alphabetically
-        files = sorted(files, key=lambda f: f.name)
-        
-        # Convert to SelectedDocument
-        selected = []
-        for file_path in files[:max_documents]:
-            selected.append(SelectedDocument(
-                path=file_path,
-                filename=file_path.name,
-                folder_name=folder.name,
-                category='legal_authorities',
-                reason='Legal authority - list only, no extraction',
-                size_mb=file_path.stat().st_size / (1024 * 1024),
-                extract_type='list'  # Don't extract, just note
-            ))
-        
-        print(f"   📚 Listed {len(selected)} legal authorities (not extracting)")
-        
-        return selected
-    
-    def _find_priority_subfolder(self, folder: Path) -> Optional[Path]:
-        """
-        Find "As Filed" / "Final" subfolder
-        
-        Args:
-            folder: Parent folder
-        
-        Returns:
-            Path to priority subfolder, or None
-        """
-        
-        subfolders = [f for f in folder.iterdir() if f.is_dir()]
-        
-        for subfolder in subfolders:
-            name = subfolder.name.lower()
-            
-            for pattern in self.PRIORITY_SUBFOLDERS:
-                if re.search(pattern, name, re.IGNORECASE):
-                    return subfolder
-        
-        return None
-    
-    def _select_from_subfolder(
-        self,
-        subfolder: Path,
-        parent_folder_name: str,
-        category: str,
-        max_documents: int,
-        extract_type: str
-    ) -> List[SelectedDocument]:
-        """
-        Select documents from a priority subfolder
-        
-        Args:
-            subfolder: Subfolder to scan
-            parent_folder_name: Name of parent folder
-            category: Document category
-            max_documents: Max to return
-            extract_type: 'full', 'list', 'skip'
-        
-        Returns:
-            List of SelectedDocument objects
-        """
-        
-        files = []
-        
-        for file_path in subfolder.rglob('*'):
-            if not file_path.is_file():
-                continue
-            
-            if file_path.suffix.lower() not in self.VALID_EXTENSIONS:
-                continue
-            
-            # Check if in a skip subfolder
-            if self._is_in_skip_subfolder(file_path, subfolder):
-                continue
-            
-            # Check filename
-            if self._should_skip_filename(file_path.name):
-                continue
-            
-            files.append(file_path)
-        
-        # Sort by priority
-        files = self._sort_by_priority(files)
-        
-        # Convert to SelectedDocument
-        selected = []
-        for file_path in files[:max_documents]:
-            selected.append(SelectedDocument(
-                path=file_path,
-                filename=file_path.name,
-                folder_name=parent_folder_name,
-                category=category,
-                reason=f'From priority subfolder: {subfolder.name}',
-                size_mb=file_path.stat().st_size / (1024 * 1024),
-                extract_type=extract_type
-            ))
-        
-        print(f"   📄 Selected {len(selected)} documents from {subfolder.name}")
-        
-        return selected
-    
-    def _select_from_all_files(
-        self,
-        folder: Path,
-        category: str,
-        max_documents: int,
-        extract_type: str
-    ) -> List[SelectedDocument]:
-        """
-        Select documents from entire folder (no priority subfolder found)
-        
-        Args:
-            folder: Folder to scan
-            category: Document category
-            max_documents: Max to return
-            extract_type: 'full', 'list', 'skip'
-        
-        Returns:
-            List of SelectedDocument objects
-        """
-        
-        files = []
-        
-        for file_path in folder.rglob('*'):
-            if not file_path.is_file():
-                continue
-            
-            if file_path.suffix.lower() not in self.VALID_EXTENSIONS:
-                continue
-            
-            # Check if in a skip subfolder
-            if self._is_in_skip_subfolder(file_path, folder):
-                continue
-            
-            # Check filename
-            if self._should_skip_filename(file_path.name):
-                continue
-            
-            files.append(file_path)
-        
-        # Sort by priority
-        files = self._sort_by_priority(files)
-        
-        # Convert to SelectedDocument
-        selected = []
-        for file_path in files[:max_documents]:
-            selected.append(SelectedDocument(
-                path=file_path,
-                filename=file_path.name,
-                folder_name=folder.name,
-                category=category,
-                reason='Master version (no drafts in path)',
-                size_mb=file_path.stat().st_size / (1024 * 1024),
-                extract_type=extract_type
-            ))
-        
-        print(f"   📄 Selected {len(selected)} documents")
-        
-        return selected
-    
-    def _is_in_skip_subfolder(self, file_path: Path, root: Path) -> bool:
-        """
-        Check if file is inside a skip subfolder
-        
-        Args:
-            file_path: File to check
-            root: Root folder (don't check above this)
-        
-        Returns:
-            True if in skip subfolder
-        """
-        
-        # Get all parent folders between file and root
-        relative = file_path.relative_to(root)
-        parts = relative.parts[:-1]  # Exclude filename
-        
-        for part in parts:
-            part_lower = part.lower()
-            
-            for pattern in self.SKIP_SUBFOLDERS:
-                if re.search(pattern, part_lower, re.IGNORECASE):
+        # Check if any part of the path matches exhibit patterns
+        for part in rel_path.parts[:-1]:  # Exclude filename itself
+            for pattern in self.EXHIBIT_SUBFOLDER_PATTERNS:
+                if re.search(pattern, part, re.IGNORECASE):
                     return True
         
         return False
     
-    def _should_skip_filename(self, filename: str) -> bool:
+    def _is_critical_excel(self, filename: str) -> bool:
         """
-        Check if filename should be skipped
+        Check if Excel file is critical for Bible
         
         Args:
-            filename: Filename to check
-        
+            filename: Name of file to check
+            
         Returns:
-            True if should skip
+            True if Excel file is critical (never skip)
         """
+        # Check if it's an Excel file
+        if not any(filename.lower().endswith(ext) for ext in self.EXCEL_EXTENSIONS):
+            return False
         
-        filename_lower = filename.lower()
-        
-        for pattern in self.SKIP_FILENAMES:
-            if re.search(pattern, filename_lower, re.IGNORECASE):
+        # Check if matches critical patterns
+        for pattern in self.CRITICAL_EXCEL_PATTERNS:
+            if re.search(pattern, filename, re.IGNORECASE):
                 return True
         
         return False
     
-    def _sort_by_priority(self, files: List[Path]) -> List[Path]:
+    def _should_skip_document(self, doc_path: Path) -> Tuple[bool, str]:
         """
-        Sort files by priority (priority filenames first)
+        Determine if document should be skipped
         
         Args:
-            files: List of file paths
-        
+            doc_path: Path to document
+            
         Returns:
-            Sorted list
+            (should_skip, reason)
         """
         
-        def priority_score(file_path: Path) -> int:
-            """Calculate priority score (higher = better)"""
-            score = 0
-            name_lower = file_path.name.lower()
-            
-            # Check priority patterns
-            for pattern in self.PRIORITY_FILENAMES:
-                if re.search(pattern, name_lower, re.IGNORECASE):
-                    score += 10
-            
-            # Prefer PDF over DOCX
-            if file_path.suffix.lower() == '.pdf':
-                score += 5
-            
-            # Prefer shorter filenames (often the main document)
-            if len(file_path.name) < 50:
-                score += 2
-            
-            return score
+        filename = doc_path.name
         
-        return sorted(files, key=priority_score, reverse=True)
+        # NEVER skip critical Excel files
+        if self._is_critical_excel(filename):
+            return False, "Critical Excel index file"
+        
+        # Check INDIVIDUAL EXHIBIT patterns (C-1.pdf, CLA-05.pdf, etc.)
+        for pattern in self.INDIVIDUAL_EXHIBIT_PATTERNS:
+            if re.match(pattern, filename, re.IGNORECASE):
+                return True, f"Individual exhibit file: {filename}"
+        
+        # Check SKIP patterns
+        for pattern in self.SKIP_PATTERNS:
+            if re.search(pattern, filename, re.IGNORECASE):
+                return True, f"Skip pattern matched: {pattern}"
+        
+        # Check DRAFT patterns
+        for pattern in self.DRAFT_PATTERNS:
+            if re.search(pattern, filename, re.IGNORECASE):
+                # Check if there's a non-draft version
+                parent = doc_path.parent
+                base_name = re.sub(r'(draft|v\d+|version\s+\d+)', '', filename, flags=re.IGNORECASE)
+                base_name = re.sub(r'\s+', ' ', base_name).strip()
+                
+                # Look for potential master version
+                for sibling in parent.glob('*'):
+                    if sibling == doc_path:
+                        continue
+                    if base_name.lower() in sibling.name.lower():
+                        if not any(re.search(p, sibling.name, re.IGNORECASE) for p in self.DRAFT_PATTERNS):
+                            return True, f"Draft version - master exists: {sibling.name}"
+                
+                # No master found, but still probably a draft
+                return True, "Draft version (no master found, but marked as draft)"
+        
+        # Check file extension
+        if not any(filename.lower().endswith(ext) for ext in self.EXTRACTABLE_EXTENSIONS):
+            return True, f"Unsupported file type: {doc_path.suffix}"
+        
+        return False, "Selected"
+    
+    def _get_extraction_type(self, classification, doc_path: Path) -> str:
+        """
+        Determine extraction type based on folder classification and document
+        
+        Args:
+            classification: FolderClassification object
+            doc_path: Path to document
+            
+        Returns:
+            'full', 'summary', or 'list'
+        """
+        
+        filename = doc_path.name
+        category = classification.category
+        
+        # Legal authorities: List only
+        if category == 'legal_authorities':
+            return 'list'
+        
+        # Indices: Always full extraction
+        if category == 'index':
+            return 'full'
+        
+        # Core pleadings: Always full extraction
+        if category in ['pleadings', 'bible_essential']:
+            return 'full'
+        
+        # Trial witnesses: Always full extraction
+        if category == 'trial_witnesses':
+            return 'full'
+        
+        # Late disclosure: Full extraction (smoking guns)
+        if category == 'late_disclosure':
+            # Check if it's an index/summary or actual document
+            if 'index' in filename.lower() or 'list' in filename.lower():
+                return 'full'
+            # Individual late disclosure docs go to vector store, not Bible
+            return 'list'
+        
+        # Procedural orders: Full extraction (usually short)
+        if category == 'procedural':
+            return 'full'
+        
+        # Everything else: List only (will be in vector store)
+        return 'list'
+    
+    def _get_priority(self, classification, doc_path: Path) -> int:
+        """
+        Get priority score (1-10) for document
+        
+        Args:
+            classification: FolderClassification object
+            doc_path: Path to document
+            
+        Returns:
+            Priority score (10 = highest)
+        """
+        
+        filename = doc_path.name.lower()
+        category = classification.category
+        
+        # Critical documents
+        if category in ['pleadings', 'bible_essential']:
+            return 10
+        
+        # Indices
+        if category == 'index':
+            return 9
+        
+        # Trial witnesses
+        if category == 'trial_witnesses':
+            return 9
+        
+        # Late disclosure summaries
+        if category == 'late_disclosure':
+            if 'index' in filename or 'list' in filename or 'summary' in filename:
+                return 8
+            return 5
+        
+        # Procedural orders
+        if category == 'procedural':
+            return 7
+        
+        # Everything else
+        return 5
     
     def select_for_bible_building(
         self,
         folder_classifications: List
-    ) -> Dict[str, List[SelectedDocument]]:
+    ) -> Dict[str, List[Document]]:
         """
-        Select all documents needed for Case Bible building
+        Select documents from classified folders
         
         Args:
-            folder_classifications: List from FolderClassifier
-        
+            folder_classifications: List of FolderClassification objects
+            
         Returns:
-            Dict organized by category
+            Dict of documents by category
         """
         
-        print("\n" + "="*70)
-        print("DOCUMENT SELECTION FOR CASE BIBLE")
-        print("="*70)
+        print(f"\n{'='*70}")
+        print("DOCUMENT SELECTION FOR BIBLE BUILDING")
+        print(f"{'='*70}\n")
         
         selected = {
             'pleadings': [],
             'indices': [],
-            'witness_statements': [],
+            'trial_witnesses': [],
             'late_disclosure': [],
             'procedural': [],
-            'legal_authorities': []  # Listed, not extracted
+            'legal_authorities': [],
+            'other': []
         }
         
-        for classification in folder_classifications:
-            if not classification.should_read_for_bible and classification.category != 'legal_authorities':
-                continue
-            
-            # Determine category and max documents
-            if classification.category == 'pleading':
-                category_key = 'pleadings'
-                max_docs = 5
-                extract_type = 'full'
-            
-            elif classification.category == 'index':
-                category_key = 'indices'
-                max_docs = 3
-                extract_type = 'full'
-            
-            elif classification.category == 'witness':
-                category_key = 'witness_statements'
-                max_docs = 20
-                extract_type = 'full'
-            
-            elif classification.category == 'late_disclosure':
-                category_key = 'late_disclosure'
-                max_docs = 20
-                extract_type = 'full'
-            
-            elif classification.category == 'procedural':
-                category_key = 'procedural'
-                max_docs = 2
-                extract_type = 'full'
-            
-            elif classification.category == 'legal_authorities':
-                category_key = 'legal_authorities'
-                max_docs = 50  # List more since not extracting
-                extract_type = 'list'  # Don't extract, just list
-            
-            else:
-                continue
-            
-            # Select documents
-            docs = self.select_documents_from_folder(
-                classification.path,
-                classification.category,
-                max_docs,
-                extract_type
-            )
-            
-            selected[category_key].extend(docs)
+        total_docs = 0
+        skipped_docs = 0
+        skipped_exhibits = 0
+        skipped_individual_exhibits = 0
         
-        # Summary
-        print("\n" + "="*70)
-        print("SELECTION SUMMARY")
-        print("="*70)
+        for classification in folder_classifications:
+            if not classification.should_read_for_bible:
+                continue
+            
+            folder_path = classification.path
+            category = classification.category
+            
+            # Map category to selection dict key
+            if category in ['pleadings', 'bible_essential']:
+                target_key = 'pleadings'
+            elif category == 'index':
+                target_key = 'indices'
+            elif category == 'trial_witnesses':
+                target_key = 'trial_witnesses'
+            elif category == 'late_disclosure':
+                target_key = 'late_disclosure'
+            elif category == 'procedural':
+                target_key = 'procedural'
+            elif category == 'legal_authorities':
+                target_key = 'legal_authorities'
+            else:
+                target_key = 'other'
+            
+            # ═══════════════════════════════════════════════════════════
+            # CRITICAL FIX: Smart folder-specific scanning
+            # ═══════════════════════════════════════════════════════════
+            
+            # FIX #1: Trial Witnesses - Only extract from "Trial Witness Statements" subfolder
+            if category == 'trial_witnesses':
+                trial_subfolder = folder_path / "Trial Witness Statements"
+                if trial_subfolder.exists() and trial_subfolder.is_dir():
+                    file_iterator = trial_subfolder.glob('*.pdf')
+                    print(f"   [Trial witnesses only: {classification.name}/Trial Witness Statements]")
+                else:
+                    # Fallback: top-level only
+                    file_iterator = folder_path.glob('*.pdf')
+                    print(f"   [Scanning top-level only: {classification.name}]")
+            
+            # FIX #2: Late Disclosure - Only extract indices/summaries, not 1,350+ individual docs
+            elif category == 'late_disclosure':
+                file_iterator = folder_path.glob('*')
+                print(f"   [Late disclosure indices only: {classification.name}]")
+            
+            # FIX #3: Pleadings & Indices - Top-level only (skip exhibit subfolders)
+            elif category in ['pleadings', 'bible_essential', 'index', 'indices']:
+                file_iterator = folder_path.glob('*')
+                print(f"   [Scanning top-level only: {classification.name}]")
+            
+            # Other categories: Recursive is fine
+            else:
+                file_iterator = folder_path.rglob('*')
+            
+            for doc_path in file_iterator:
+                if not doc_path.is_file():
+                    continue
+                
+                total_docs += 1
+                
+                # Check if inside exhibit subfolder
+                if self._is_exhibit_subfolder(doc_path, folder_path):
+                    skipped_exhibits += 1
+                    continue
+                
+                # Check if should skip
+                should_skip, reason = self._should_skip_document(doc_path)
+                
+                if should_skip:
+                    # Track individual exhibits separately
+                    if "Individual exhibit file" in reason:
+                        skipped_individual_exhibits += 1
+                    else:
+                        skipped_docs += 1
+                    continue
+                
+                # Get extraction type and priority
+                extract_type = self._get_extraction_type(classification, doc_path)
+                priority = self._get_priority(classification, doc_path)
+                
+                # Calculate size
+                size_mb = doc_path.stat().st_size / (1024 * 1024)
+                
+                # Create Document object
+                doc = Document(
+                    path=doc_path,
+                    filename=doc_path.name,
+                    folder_name=classification.name,
+                    size_mb=size_mb,
+                    extract_type=extract_type,
+                    priority=priority,
+                    reason=f"Selected from {category}"
+                )
+                
+                selected[target_key].append(doc)
+        
+        # Sort each category by priority
+        for key in selected:
+            selected[key].sort(key=lambda x: x.priority, reverse=True)
+        
+        # Print summary
+        self._print_selection_summary(selected, total_docs, skipped_docs, skipped_exhibits, skipped_individual_exhibits)
+        
+        return selected
+    
+    def _print_selection_summary(
+        self,
+        selected: Dict[str, List[Document]],
+        total_docs: int,
+        skipped_docs: int,
+        skipped_exhibits: int,
+        skipped_individual_exhibits: int
+    ) -> None:
+        """Print selection summary"""
+        
+        print(f"\n{'='*70}")
+        print("DOCUMENT SELECTION SUMMARY")
+        print(f"{'='*70}\n")
         
         total = 0
-        total_size = 0
         total_to_extract = 0
+        total_size = 0.0
         
         for category, docs in selected.items():
-            count = len(docs)
-            size = sum(d.size_mb for d in docs)
-            to_extract = len([d for d in docs if d.extract_type == 'full'])
-            total += count
-            total_size += size
-            total_to_extract += to_extract
+            if not docs:
+                continue
             
-            print(f"\n{category.upper().replace('_', ' ')}:")
+            count = len(docs)
+            to_extract = len([d for d in docs if d.extract_type == 'full'])
+            size = sum(d.size_mb for d in docs)
+            
+            total += count
+            total_to_extract += to_extract
+            total_size += size
+            
+            print(f"{category.upper().replace('_', ' ')}:")
             print(f"   Documents: {count}")
             print(f"   To extract: {to_extract} (full text)")
             print(f"   To list: {count - to_extract} (reference only)")
@@ -539,14 +459,21 @@ class DocumentSelector:
                     print(f"      • {doc.filename[:60]}")
                 if len(docs) > 3:
                     print(f"      ... and {len(docs)-3} more")
+            
+            print()
         
-        print(f"\n{'='*70}")
+        print(f"{'='*70}")
         print(f"TOTAL DOCUMENTS: {total}")
+        print(f"   Total found: {total_docs}")
+        print(f"   Skipped (drafts/duplicates): {skipped_docs}")
+        print(f"   Skipped (exhibit subfolders): {skipped_exhibits}")
+        print(f"   Skipped (individual exhibits): {skipped_individual_exhibits}")
+        print(f"   Selected: {total}")
         print(f"   To extract (full text): {total_to_extract} ({total_size:.1f} MB)")
         print(f"   To list (reference): {total - total_to_extract}")
+        print(f"\n💡 Individual exhibits (C-XX, CLA-XX, FA-XX) belong in vector store,")
+        print(f"   not the Bible. They'll be searchable via the indices!")
         print(f"{'='*70}\n")
-        
-        return selected
 
 
 def main():
@@ -581,7 +508,2410 @@ def main():
     
     print(f"\n✅ {extract_count} documents will be extracted (full text)")
     print(f"📚 {list_count} documents will be listed (reference only)")
-    print(f"\nThis saves extracting legal authorities while still noting their existence!")
+    print(f"\nThis saves extracting hundreds of exhibits while still noting their existence!")
+
+
+if __name__ == '__main__':
+    main()
+,         # C-1.pdf, C-45.pdf, C-100.pdf
+        r'^FA-\d+\.pdf
+    
+    def __init__(self):
+        """Initialise document selector"""
+        pass
+    
+    def _is_exhibit_subfolder(self, path: Path, parent_folder: Path) -> bool:
+        """
+        Check if path is inside an exhibit subfolder
+        
+        Args:
+            path: File path to check
+            parent_folder: Parent folder path
+            
+        Returns:
+            True if file is inside an exhibit subfolder
+        """
+        # Get relative path from parent
+        try:
+            rel_path = path.relative_to(parent_folder)
+        except ValueError:
+            return False
+        
+        # Check if any part of the path matches exhibit patterns
+        for part in rel_path.parts[:-1]:  # Exclude filename itself
+            for pattern in self.EXHIBIT_SUBFOLDER_PATTERNS:
+                if re.search(pattern, part, re.IGNORECASE):
+                    return True
+        
+        return False
+    
+    def _is_critical_excel(self, filename: str) -> bool:
+        """
+        Check if Excel file is critical for Bible
+        
+        Args:
+            filename: Name of file to check
+            
+        Returns:
+            True if Excel file is critical (never skip)
+        """
+        # Check if it's an Excel file
+        if not any(filename.lower().endswith(ext) for ext in self.EXCEL_EXTENSIONS):
+            return False
+        
+        # Check if matches critical patterns
+        for pattern in self.CRITICAL_EXCEL_PATTERNS:
+            if re.search(pattern, filename, re.IGNORECASE):
+                return True
+        
+        return False
+    
+    def _should_skip_document(self, doc_path: Path) -> Tuple[bool, str]:
+        """
+        Determine if document should be skipped
+        
+        Args:
+            doc_path: Path to document
+            
+        Returns:
+            (should_skip, reason)
+        """
+        
+        filename = doc_path.name
+        
+        # NEVER skip critical Excel files
+        if self._is_critical_excel(filename):
+            return False, "Critical Excel index file"
+        
+        # Check SKIP patterns first
+        for pattern in self.SKIP_PATTERNS:
+            if re.search(pattern, filename, re.IGNORECASE):
+                return True, f"Skip pattern matched: {pattern}"
+        
+        # Check DRAFT patterns
+        for pattern in self.DRAFT_PATTERNS:
+            if re.search(pattern, filename, re.IGNORECASE):
+                # Check if there's a non-draft version
+                parent = doc_path.parent
+                base_name = re.sub(r'(draft|v\d+|version\s+\d+)', '', filename, flags=re.IGNORECASE)
+                base_name = re.sub(r'\s+', ' ', base_name).strip()
+                
+                # Look for potential master version
+                for sibling in parent.glob('*'):
+                    if sibling == doc_path:
+                        continue
+                    if base_name.lower() in sibling.name.lower():
+                        if not any(re.search(p, sibling.name, re.IGNORECASE) for p in self.DRAFT_PATTERNS):
+                            return True, f"Draft version - master exists: {sibling.name}"
+                
+                # No master found, but still probably a draft
+                return True, "Draft version (no master found, but marked as draft)"
+        
+        # Check file extension
+        if not any(filename.lower().endswith(ext) for ext in self.EXTRACTABLE_EXTENSIONS):
+            return True, f"Unsupported file type: {doc_path.suffix}"
+        
+        return False, "Selected"
+    
+    def _get_extraction_type(self, classification, doc_path: Path) -> str:
+        """
+        Determine extraction type based on folder classification and document
+        
+        Args:
+            classification: FolderClassification object
+            doc_path: Path to document
+            
+        Returns:
+            'full', 'summary', or 'list'
+        """
+        
+        filename = doc_path.name
+        category = classification.category
+        
+        # Legal authorities: List only
+        if category == 'legal_authorities':
+            return 'list'
+        
+        # Indices: Always full extraction
+        if category == 'index':
+            return 'full'
+        
+        # Core pleadings: Always full extraction
+        if category in ['pleadings', 'bible_essential']:
+            return 'full'
+        
+        # Trial witnesses: Always full extraction
+        if category == 'trial_witnesses':
+            return 'full'
+        
+        # Late disclosure: Full extraction (smoking guns)
+        if category == 'late_disclosure':
+            # Check if it's an index/summary or actual document
+            if 'index' in filename.lower() or 'list' in filename.lower():
+                return 'full'
+            # Individual late disclosure docs go to vector store, not Bible
+            return 'list'
+        
+        # Procedural orders: Full extraction (usually short)
+        if category == 'procedural':
+            return 'full'
+        
+        # Everything else: List only (will be in vector store)
+        return 'list'
+    
+    def _get_priority(self, classification, doc_path: Path) -> int:
+        """
+        Get priority score (1-10) for document
+        
+        Args:
+            classification: FolderClassification object
+            doc_path: Path to document
+            
+        Returns:
+            Priority score (10 = highest)
+        """
+        
+        filename = doc_path.name.lower()
+        category = classification.category
+        
+        # Critical documents
+        if category in ['pleadings', 'bible_essential']:
+            return 10
+        
+        # Indices
+        if category == 'index':
+            return 9
+        
+        # Trial witnesses
+        if category == 'trial_witnesses':
+            return 9
+        
+        # Late disclosure summaries
+        if category == 'late_disclosure':
+            if 'index' in filename or 'list' in filename or 'summary' in filename:
+                return 8
+            return 5
+        
+        # Procedural orders
+        if category == 'procedural':
+            return 7
+        
+        # Everything else
+        return 5
+    
+    def select_for_bible_building(
+        self,
+        folder_classifications: List
+    ) -> Dict[str, List[Document]]:
+        """
+        Select documents from classified folders
+        
+        Args:
+            folder_classifications: List of FolderClassification objects
+            
+        Returns:
+            Dict of documents by category
+        """
+        
+        print(f"\n{'='*70}")
+        print("DOCUMENT SELECTION FOR BIBLE BUILDING")
+        print(f"{'='*70}\n")
+        
+        selected = {
+            'pleadings': [],
+            'indices': [],
+            'trial_witnesses': [],
+            'late_disclosure': [],
+            'procedural': [],
+            'legal_authorities': [],
+            'other': []
+        }
+        
+        total_docs = 0
+        skipped_docs = 0
+        skipped_exhibits = 0
+        
+        for classification in folder_classifications:
+            if not classification.should_read_for_bible:
+                continue
+            
+            folder_path = classification.path
+            category = classification.category
+            
+            # Map category to selection dict key
+            if category in ['pleadings', 'bible_essential']:
+                target_key = 'pleadings'
+            elif category == 'index':
+                target_key = 'indices'
+            elif category == 'trial_witnesses':
+                target_key = 'trial_witnesses'
+            elif category == 'late_disclosure':
+                target_key = 'late_disclosure'
+            elif category == 'procedural':
+                target_key = 'procedural'
+            elif category == 'legal_authorities':
+                target_key = 'legal_authorities'
+            else:
+                target_key = 'other'
+            
+            # ═══════════════════════════════════════════════════════════
+            # CRITICAL FIX: For pleadings and indices folders, ONLY get top-level files
+            # Skip exhibit subfolders entirely (C-XX, FA-XX, CLA-XX, etc.)
+            # ═══════════════════════════════════════════════════════════
+            if category in ['pleadings', 'bible_essential', 'index', 'indices']:
+                # Only get files directly in this folder (not subfolders)
+                file_iterator = folder_path.glob('*')
+                print(f"   [Scanning top-level only: {classification.name}]")
+            else:
+                # For other categories, recursive is fine
+                file_iterator = folder_path.rglob('*')
+            
+            for doc_path in file_iterator:
+                if not doc_path.is_file():
+                    continue
+                
+                total_docs += 1
+                
+                # Check if inside exhibit subfolder
+                if self._is_exhibit_subfolder(doc_path, folder_path):
+                    skipped_exhibits += 1
+                    continue
+                
+                # Check if should skip
+                should_skip, reason = self._should_skip_document(doc_path)
+                
+                if should_skip:
+                    skipped_docs += 1
+                    continue
+                
+                # Get extraction type and priority
+                extract_type = self._get_extraction_type(classification, doc_path)
+                priority = self._get_priority(classification, doc_path)
+                
+                # Calculate size
+                size_mb = doc_path.stat().st_size / (1024 * 1024)
+                
+                # Create Document object
+                doc = Document(
+                    path=doc_path,
+                    filename=doc_path.name,
+                    folder_name=classification.name,
+                    size_mb=size_mb,
+                    extract_type=extract_type,
+                    priority=priority,
+                    reason=f"Selected from {category}"
+                )
+                
+                selected[target_key].append(doc)
+        
+        # Sort each category by priority
+        for key in selected:
+            selected[key].sort(key=lambda x: x.priority, reverse=True)
+        
+        # Print summary
+        self._print_selection_summary(selected, total_docs, skipped_docs, skipped_exhibits)
+        
+        return selected
+    
+    def _print_selection_summary(
+        self,
+        selected: Dict[str, List[Document]],
+        total_docs: int,
+        skipped_docs: int,
+        skipped_exhibits: int
+    ) -> None:
+        """Print selection summary"""
+        
+        print(f"\n{'='*70}")
+        print("DOCUMENT SELECTION SUMMARY")
+        print(f"{'='*70}\n")
+        
+        total = 0
+        total_to_extract = 0
+        total_size = 0.0
+        
+        for category, docs in selected.items():
+            if not docs:
+                continue
+            
+            count = len(docs)
+            to_extract = len([d for d in docs if d.extract_type == 'full'])
+            size = sum(d.size_mb for d in docs)
+            
+            total += count
+            total_to_extract += to_extract
+            total_size += size
+            
+            print(f"{category.upper().replace('_', ' ')}:")
+            print(f"   Documents: {count}")
+            print(f"   To extract: {to_extract} (full text)")
+            print(f"   To list: {count - to_extract} (reference only)")
+            print(f"   Size: {size:.1f} MB")
+            
+            if docs and category != 'legal_authorities':
+                print(f"   Files:")
+                for doc in docs[:5]:
+                    print(f"      • {doc.filename[:60]}")
+                if len(docs) > 5:
+                    print(f"      ... and {len(docs)-5} more")
+            
+            elif docs and category == 'legal_authorities':
+                print(f"   Sample files (not extracting):")
+                for doc in docs[:3]:
+                    print(f"      • {doc.filename[:60]}")
+                if len(docs) > 3:
+                    print(f"      ... and {len(docs)-3} more")
+            
+            print()
+        
+        print(f"{'='*70}")
+        print(f"TOTAL DOCUMENTS: {total}")
+        print(f"   Total found: {total_docs}")
+        print(f"   Skipped (drafts/duplicates): {skipped_docs}")
+        print(f"   Skipped (exhibit subfolders): {skipped_exhibits}")
+        print(f"   Selected: {total}")
+        print(f"   To extract (full text): {total_to_extract} ({total_size:.1f} MB)")
+        print(f"   To list (reference): {total - total_to_extract}")
+        print(f"{'='*70}\n")
+
+
+def main():
+    """Test document selector"""
+    
+    from folder_classifier import FolderClassifier
+    
+    # Test on your case
+    root_path = Path(r"C:\Users\JemAndrew\Velitor\Communication site - Documents\LIS1.1")
+    
+    # First classify folders
+    classifier = FolderClassifier(root_path)
+    organised = classifier.get_folders_for_bible()
+    
+    # Get all classifications
+    to_process = (organised['critical'] + organised['high'] + 
+                  organised['medium'] + organised['legal_authorities'])
+    
+    # Select documents
+    selector = DocumentSelector()
+    selected = selector.select_for_bible_building(to_process)
+    
+    # Show what we'll extract vs list
+    print("\n" + "="*70)
+    print("READY FOR BIBLE BUILDING")
+    print("="*70)
+    
+    extract_count = sum(len([d for d in docs if d.extract_type == 'full']) 
+                       for docs in selected.values())
+    list_count = sum(len([d for d in docs if d.extract_type == 'list']) 
+                    for docs in selected.values())
+    
+    print(f"\n✅ {extract_count} documents will be extracted (full text)")
+    print(f"📚 {list_count} documents will be listed (reference only)")
+    print(f"\nThis saves extracting hundreds of exhibits while still noting their existence!")
+
+
+if __name__ == '__main__':
+    main()
+,        # FA-1.pdf, FA-10.pdf (expert exhibits)
+        r'^CLA-\d+\.pdf
+    
+    def __init__(self):
+        """Initialise document selector"""
+        pass
+    
+    def _is_exhibit_subfolder(self, path: Path, parent_folder: Path) -> bool:
+        """
+        Check if path is inside an exhibit subfolder
+        
+        Args:
+            path: File path to check
+            parent_folder: Parent folder path
+            
+        Returns:
+            True if file is inside an exhibit subfolder
+        """
+        # Get relative path from parent
+        try:
+            rel_path = path.relative_to(parent_folder)
+        except ValueError:
+            return False
+        
+        # Check if any part of the path matches exhibit patterns
+        for part in rel_path.parts[:-1]:  # Exclude filename itself
+            for pattern in self.EXHIBIT_SUBFOLDER_PATTERNS:
+                if re.search(pattern, part, re.IGNORECASE):
+                    return True
+        
+        return False
+    
+    def _is_critical_excel(self, filename: str) -> bool:
+        """
+        Check if Excel file is critical for Bible
+        
+        Args:
+            filename: Name of file to check
+            
+        Returns:
+            True if Excel file is critical (never skip)
+        """
+        # Check if it's an Excel file
+        if not any(filename.lower().endswith(ext) for ext in self.EXCEL_EXTENSIONS):
+            return False
+        
+        # Check if matches critical patterns
+        for pattern in self.CRITICAL_EXCEL_PATTERNS:
+            if re.search(pattern, filename, re.IGNORECASE):
+                return True
+        
+        return False
+    
+    def _should_skip_document(self, doc_path: Path) -> Tuple[bool, str]:
+        """
+        Determine if document should be skipped
+        
+        Args:
+            doc_path: Path to document
+            
+        Returns:
+            (should_skip, reason)
+        """
+        
+        filename = doc_path.name
+        
+        # NEVER skip critical Excel files
+        if self._is_critical_excel(filename):
+            return False, "Critical Excel index file"
+        
+        # Check SKIP patterns first
+        for pattern in self.SKIP_PATTERNS:
+            if re.search(pattern, filename, re.IGNORECASE):
+                return True, f"Skip pattern matched: {pattern}"
+        
+        # Check DRAFT patterns
+        for pattern in self.DRAFT_PATTERNS:
+            if re.search(pattern, filename, re.IGNORECASE):
+                # Check if there's a non-draft version
+                parent = doc_path.parent
+                base_name = re.sub(r'(draft|v\d+|version\s+\d+)', '', filename, flags=re.IGNORECASE)
+                base_name = re.sub(r'\s+', ' ', base_name).strip()
+                
+                # Look for potential master version
+                for sibling in parent.glob('*'):
+                    if sibling == doc_path:
+                        continue
+                    if base_name.lower() in sibling.name.lower():
+                        if not any(re.search(p, sibling.name, re.IGNORECASE) for p in self.DRAFT_PATTERNS):
+                            return True, f"Draft version - master exists: {sibling.name}"
+                
+                # No master found, but still probably a draft
+                return True, "Draft version (no master found, but marked as draft)"
+        
+        # Check file extension
+        if not any(filename.lower().endswith(ext) for ext in self.EXTRACTABLE_EXTENSIONS):
+            return True, f"Unsupported file type: {doc_path.suffix}"
+        
+        return False, "Selected"
+    
+    def _get_extraction_type(self, classification, doc_path: Path) -> str:
+        """
+        Determine extraction type based on folder classification and document
+        
+        Args:
+            classification: FolderClassification object
+            doc_path: Path to document
+            
+        Returns:
+            'full', 'summary', or 'list'
+        """
+        
+        filename = doc_path.name
+        category = classification.category
+        
+        # Legal authorities: List only
+        if category == 'legal_authorities':
+            return 'list'
+        
+        # Indices: Always full extraction
+        if category == 'index':
+            return 'full'
+        
+        # Core pleadings: Always full extraction
+        if category in ['pleadings', 'bible_essential']:
+            return 'full'
+        
+        # Trial witnesses: Always full extraction
+        if category == 'trial_witnesses':
+            return 'full'
+        
+        # Late disclosure: Full extraction (smoking guns)
+        if category == 'late_disclosure':
+            # Check if it's an index/summary or actual document
+            if 'index' in filename.lower() or 'list' in filename.lower():
+                return 'full'
+            # Individual late disclosure docs go to vector store, not Bible
+            return 'list'
+        
+        # Procedural orders: Full extraction (usually short)
+        if category == 'procedural':
+            return 'full'
+        
+        # Everything else: List only (will be in vector store)
+        return 'list'
+    
+    def _get_priority(self, classification, doc_path: Path) -> int:
+        """
+        Get priority score (1-10) for document
+        
+        Args:
+            classification: FolderClassification object
+            doc_path: Path to document
+            
+        Returns:
+            Priority score (10 = highest)
+        """
+        
+        filename = doc_path.name.lower()
+        category = classification.category
+        
+        # Critical documents
+        if category in ['pleadings', 'bible_essential']:
+            return 10
+        
+        # Indices
+        if category == 'index':
+            return 9
+        
+        # Trial witnesses
+        if category == 'trial_witnesses':
+            return 9
+        
+        # Late disclosure summaries
+        if category == 'late_disclosure':
+            if 'index' in filename or 'list' in filename or 'summary' in filename:
+                return 8
+            return 5
+        
+        # Procedural orders
+        if category == 'procedural':
+            return 7
+        
+        # Everything else
+        return 5
+    
+    def select_for_bible_building(
+        self,
+        folder_classifications: List
+    ) -> Dict[str, List[Document]]:
+        """
+        Select documents from classified folders
+        
+        Args:
+            folder_classifications: List of FolderClassification objects
+            
+        Returns:
+            Dict of documents by category
+        """
+        
+        print(f"\n{'='*70}")
+        print("DOCUMENT SELECTION FOR BIBLE BUILDING")
+        print(f"{'='*70}\n")
+        
+        selected = {
+            'pleadings': [],
+            'indices': [],
+            'trial_witnesses': [],
+            'late_disclosure': [],
+            'procedural': [],
+            'legal_authorities': [],
+            'other': []
+        }
+        
+        total_docs = 0
+        skipped_docs = 0
+        skipped_exhibits = 0
+        
+        for classification in folder_classifications:
+            if not classification.should_read_for_bible:
+                continue
+            
+            folder_path = classification.path
+            category = classification.category
+            
+            # Map category to selection dict key
+            if category in ['pleadings', 'bible_essential']:
+                target_key = 'pleadings'
+            elif category == 'index':
+                target_key = 'indices'
+            elif category == 'trial_witnesses':
+                target_key = 'trial_witnesses'
+            elif category == 'late_disclosure':
+                target_key = 'late_disclosure'
+            elif category == 'procedural':
+                target_key = 'procedural'
+            elif category == 'legal_authorities':
+                target_key = 'legal_authorities'
+            else:
+                target_key = 'other'
+            
+            # ═══════════════════════════════════════════════════════════
+            # CRITICAL FIX: For pleadings and indices folders, ONLY get top-level files
+            # Skip exhibit subfolders entirely (C-XX, FA-XX, CLA-XX, etc.)
+            # ═══════════════════════════════════════════════════════════
+            if category in ['pleadings', 'bible_essential', 'index', 'indices']:
+                # Only get files directly in this folder (not subfolders)
+                file_iterator = folder_path.glob('*')
+                print(f"   [Scanning top-level only: {classification.name}]")
+            else:
+                # For other categories, recursive is fine
+                file_iterator = folder_path.rglob('*')
+            
+            for doc_path in file_iterator:
+                if not doc_path.is_file():
+                    continue
+                
+                total_docs += 1
+                
+                # Check if inside exhibit subfolder
+                if self._is_exhibit_subfolder(doc_path, folder_path):
+                    skipped_exhibits += 1
+                    continue
+                
+                # Check if should skip
+                should_skip, reason = self._should_skip_document(doc_path)
+                
+                if should_skip:
+                    skipped_docs += 1
+                    continue
+                
+                # Get extraction type and priority
+                extract_type = self._get_extraction_type(classification, doc_path)
+                priority = self._get_priority(classification, doc_path)
+                
+                # Calculate size
+                size_mb = doc_path.stat().st_size / (1024 * 1024)
+                
+                # Create Document object
+                doc = Document(
+                    path=doc_path,
+                    filename=doc_path.name,
+                    folder_name=classification.name,
+                    size_mb=size_mb,
+                    extract_type=extract_type,
+                    priority=priority,
+                    reason=f"Selected from {category}"
+                )
+                
+                selected[target_key].append(doc)
+        
+        # Sort each category by priority
+        for key in selected:
+            selected[key].sort(key=lambda x: x.priority, reverse=True)
+        
+        # Print summary
+        self._print_selection_summary(selected, total_docs, skipped_docs, skipped_exhibits)
+        
+        return selected
+    
+    def _print_selection_summary(
+        self,
+        selected: Dict[str, List[Document]],
+        total_docs: int,
+        skipped_docs: int,
+        skipped_exhibits: int
+    ) -> None:
+        """Print selection summary"""
+        
+        print(f"\n{'='*70}")
+        print("DOCUMENT SELECTION SUMMARY")
+        print(f"{'='*70}\n")
+        
+        total = 0
+        total_to_extract = 0
+        total_size = 0.0
+        
+        for category, docs in selected.items():
+            if not docs:
+                continue
+            
+            count = len(docs)
+            to_extract = len([d for d in docs if d.extract_type == 'full'])
+            size = sum(d.size_mb for d in docs)
+            
+            total += count
+            total_to_extract += to_extract
+            total_size += size
+            
+            print(f"{category.upper().replace('_', ' ')}:")
+            print(f"   Documents: {count}")
+            print(f"   To extract: {to_extract} (full text)")
+            print(f"   To list: {count - to_extract} (reference only)")
+            print(f"   Size: {size:.1f} MB")
+            
+            if docs and category != 'legal_authorities':
+                print(f"   Files:")
+                for doc in docs[:5]:
+                    print(f"      • {doc.filename[:60]}")
+                if len(docs) > 5:
+                    print(f"      ... and {len(docs)-5} more")
+            
+            elif docs and category == 'legal_authorities':
+                print(f"   Sample files (not extracting):")
+                for doc in docs[:3]:
+                    print(f"      • {doc.filename[:60]}")
+                if len(docs) > 3:
+                    print(f"      ... and {len(docs)-3} more")
+            
+            print()
+        
+        print(f"{'='*70}")
+        print(f"TOTAL DOCUMENTS: {total}")
+        print(f"   Total found: {total_docs}")
+        print(f"   Skipped (drafts/duplicates): {skipped_docs}")
+        print(f"   Skipped (exhibit subfolders): {skipped_exhibits}")
+        print(f"   Selected: {total}")
+        print(f"   To extract (full text): {total_to_extract} ({total_size:.1f} MB)")
+        print(f"   To list (reference): {total - total_to_extract}")
+        print(f"{'='*70}\n")
+
+
+def main():
+    """Test document selector"""
+    
+    from folder_classifier import FolderClassifier
+    
+    # Test on your case
+    root_path = Path(r"C:\Users\JemAndrew\Velitor\Communication site - Documents\LIS1.1")
+    
+    # First classify folders
+    classifier = FolderClassifier(root_path)
+    organised = classifier.get_folders_for_bible()
+    
+    # Get all classifications
+    to_process = (organised['critical'] + organised['high'] + 
+                  organised['medium'] + organised['legal_authorities'])
+    
+    # Select documents
+    selector = DocumentSelector()
+    selected = selector.select_for_bible_building(to_process)
+    
+    # Show what we'll extract vs list
+    print("\n" + "="*70)
+    print("READY FOR BIBLE BUILDING")
+    print("="*70)
+    
+    extract_count = sum(len([d for d in docs if d.extract_type == 'full']) 
+                       for docs in selected.values())
+    list_count = sum(len([d for d in docs if d.extract_type == 'list']) 
+                    for docs in selected.values())
+    
+    print(f"\n✅ {extract_count} documents will be extracted (full text)")
+    print(f"📚 {list_count} documents will be listed (reference only)")
+    print(f"\nThis saves extracting hundreds of exhibits while still noting their existence!")
+
+
+if __name__ == '__main__':
+    main()
+,       # CLA-1.pdf, CLA-05.pdf (legal authorities)
+        r'^R-\d+\.pdf
+    
+    def __init__(self):
+        """Initialise document selector"""
+        pass
+    
+    def _is_exhibit_subfolder(self, path: Path, parent_folder: Path) -> bool:
+        """
+        Check if path is inside an exhibit subfolder
+        
+        Args:
+            path: File path to check
+            parent_folder: Parent folder path
+            
+        Returns:
+            True if file is inside an exhibit subfolder
+        """
+        # Get relative path from parent
+        try:
+            rel_path = path.relative_to(parent_folder)
+        except ValueError:
+            return False
+        
+        # Check if any part of the path matches exhibit patterns
+        for part in rel_path.parts[:-1]:  # Exclude filename itself
+            for pattern in self.EXHIBIT_SUBFOLDER_PATTERNS:
+                if re.search(pattern, part, re.IGNORECASE):
+                    return True
+        
+        return False
+    
+    def _is_critical_excel(self, filename: str) -> bool:
+        """
+        Check if Excel file is critical for Bible
+        
+        Args:
+            filename: Name of file to check
+            
+        Returns:
+            True if Excel file is critical (never skip)
+        """
+        # Check if it's an Excel file
+        if not any(filename.lower().endswith(ext) for ext in self.EXCEL_EXTENSIONS):
+            return False
+        
+        # Check if matches critical patterns
+        for pattern in self.CRITICAL_EXCEL_PATTERNS:
+            if re.search(pattern, filename, re.IGNORECASE):
+                return True
+        
+        return False
+    
+    def _should_skip_document(self, doc_path: Path) -> Tuple[bool, str]:
+        """
+        Determine if document should be skipped
+        
+        Args:
+            doc_path: Path to document
+            
+        Returns:
+            (should_skip, reason)
+        """
+        
+        filename = doc_path.name
+        
+        # NEVER skip critical Excel files
+        if self._is_critical_excel(filename):
+            return False, "Critical Excel index file"
+        
+        # Check SKIP patterns first
+        for pattern in self.SKIP_PATTERNS:
+            if re.search(pattern, filename, re.IGNORECASE):
+                return True, f"Skip pattern matched: {pattern}"
+        
+        # Check DRAFT patterns
+        for pattern in self.DRAFT_PATTERNS:
+            if re.search(pattern, filename, re.IGNORECASE):
+                # Check if there's a non-draft version
+                parent = doc_path.parent
+                base_name = re.sub(r'(draft|v\d+|version\s+\d+)', '', filename, flags=re.IGNORECASE)
+                base_name = re.sub(r'\s+', ' ', base_name).strip()
+                
+                # Look for potential master version
+                for sibling in parent.glob('*'):
+                    if sibling == doc_path:
+                        continue
+                    if base_name.lower() in sibling.name.lower():
+                        if not any(re.search(p, sibling.name, re.IGNORECASE) for p in self.DRAFT_PATTERNS):
+                            return True, f"Draft version - master exists: {sibling.name}"
+                
+                # No master found, but still probably a draft
+                return True, "Draft version (no master found, but marked as draft)"
+        
+        # Check file extension
+        if not any(filename.lower().endswith(ext) for ext in self.EXTRACTABLE_EXTENSIONS):
+            return True, f"Unsupported file type: {doc_path.suffix}"
+        
+        return False, "Selected"
+    
+    def _get_extraction_type(self, classification, doc_path: Path) -> str:
+        """
+        Determine extraction type based on folder classification and document
+        
+        Args:
+            classification: FolderClassification object
+            doc_path: Path to document
+            
+        Returns:
+            'full', 'summary', or 'list'
+        """
+        
+        filename = doc_path.name
+        category = classification.category
+        
+        # Legal authorities: List only
+        if category == 'legal_authorities':
+            return 'list'
+        
+        # Indices: Always full extraction
+        if category == 'index':
+            return 'full'
+        
+        # Core pleadings: Always full extraction
+        if category in ['pleadings', 'bible_essential']:
+            return 'full'
+        
+        # Trial witnesses: Always full extraction
+        if category == 'trial_witnesses':
+            return 'full'
+        
+        # Late disclosure: Full extraction (smoking guns)
+        if category == 'late_disclosure':
+            # Check if it's an index/summary or actual document
+            if 'index' in filename.lower() or 'list' in filename.lower():
+                return 'full'
+            # Individual late disclosure docs go to vector store, not Bible
+            return 'list'
+        
+        # Procedural orders: Full extraction (usually short)
+        if category == 'procedural':
+            return 'full'
+        
+        # Everything else: List only (will be in vector store)
+        return 'list'
+    
+    def _get_priority(self, classification, doc_path: Path) -> int:
+        """
+        Get priority score (1-10) for document
+        
+        Args:
+            classification: FolderClassification object
+            doc_path: Path to document
+            
+        Returns:
+            Priority score (10 = highest)
+        """
+        
+        filename = doc_path.name.lower()
+        category = classification.category
+        
+        # Critical documents
+        if category in ['pleadings', 'bible_essential']:
+            return 10
+        
+        # Indices
+        if category == 'index':
+            return 9
+        
+        # Trial witnesses
+        if category == 'trial_witnesses':
+            return 9
+        
+        # Late disclosure summaries
+        if category == 'late_disclosure':
+            if 'index' in filename or 'list' in filename or 'summary' in filename:
+                return 8
+            return 5
+        
+        # Procedural orders
+        if category == 'procedural':
+            return 7
+        
+        # Everything else
+        return 5
+    
+    def select_for_bible_building(
+        self,
+        folder_classifications: List
+    ) -> Dict[str, List[Document]]:
+        """
+        Select documents from classified folders
+        
+        Args:
+            folder_classifications: List of FolderClassification objects
+            
+        Returns:
+            Dict of documents by category
+        """
+        
+        print(f"\n{'='*70}")
+        print("DOCUMENT SELECTION FOR BIBLE BUILDING")
+        print(f"{'='*70}\n")
+        
+        selected = {
+            'pleadings': [],
+            'indices': [],
+            'trial_witnesses': [],
+            'late_disclosure': [],
+            'procedural': [],
+            'legal_authorities': [],
+            'other': []
+        }
+        
+        total_docs = 0
+        skipped_docs = 0
+        skipped_exhibits = 0
+        
+        for classification in folder_classifications:
+            if not classification.should_read_for_bible:
+                continue
+            
+            folder_path = classification.path
+            category = classification.category
+            
+            # Map category to selection dict key
+            if category in ['pleadings', 'bible_essential']:
+                target_key = 'pleadings'
+            elif category == 'index':
+                target_key = 'indices'
+            elif category == 'trial_witnesses':
+                target_key = 'trial_witnesses'
+            elif category == 'late_disclosure':
+                target_key = 'late_disclosure'
+            elif category == 'procedural':
+                target_key = 'procedural'
+            elif category == 'legal_authorities':
+                target_key = 'legal_authorities'
+            else:
+                target_key = 'other'
+            
+            # ═══════════════════════════════════════════════════════════
+            # CRITICAL FIX: For pleadings and indices folders, ONLY get top-level files
+            # Skip exhibit subfolders entirely (C-XX, FA-XX, CLA-XX, etc.)
+            # ═══════════════════════════════════════════════════════════
+            if category in ['pleadings', 'bible_essential', 'index', 'indices']:
+                # Only get files directly in this folder (not subfolders)
+                file_iterator = folder_path.glob('*')
+                print(f"   [Scanning top-level only: {classification.name}]")
+            else:
+                # For other categories, recursive is fine
+                file_iterator = folder_path.rglob('*')
+            
+            for doc_path in file_iterator:
+                if not doc_path.is_file():
+                    continue
+                
+                total_docs += 1
+                
+                # Check if inside exhibit subfolder
+                if self._is_exhibit_subfolder(doc_path, folder_path):
+                    skipped_exhibits += 1
+                    continue
+                
+                # Check if should skip
+                should_skip, reason = self._should_skip_document(doc_path)
+                
+                if should_skip:
+                    skipped_docs += 1
+                    continue
+                
+                # Get extraction type and priority
+                extract_type = self._get_extraction_type(classification, doc_path)
+                priority = self._get_priority(classification, doc_path)
+                
+                # Calculate size
+                size_mb = doc_path.stat().st_size / (1024 * 1024)
+                
+                # Create Document object
+                doc = Document(
+                    path=doc_path,
+                    filename=doc_path.name,
+                    folder_name=classification.name,
+                    size_mb=size_mb,
+                    extract_type=extract_type,
+                    priority=priority,
+                    reason=f"Selected from {category}"
+                )
+                
+                selected[target_key].append(doc)
+        
+        # Sort each category by priority
+        for key in selected:
+            selected[key].sort(key=lambda x: x.priority, reverse=True)
+        
+        # Print summary
+        self._print_selection_summary(selected, total_docs, skipped_docs, skipped_exhibits)
+        
+        return selected
+    
+    def _print_selection_summary(
+        self,
+        selected: Dict[str, List[Document]],
+        total_docs: int,
+        skipped_docs: int,
+        skipped_exhibits: int
+    ) -> None:
+        """Print selection summary"""
+        
+        print(f"\n{'='*70}")
+        print("DOCUMENT SELECTION SUMMARY")
+        print(f"{'='*70}\n")
+        
+        total = 0
+        total_to_extract = 0
+        total_size = 0.0
+        
+        for category, docs in selected.items():
+            if not docs:
+                continue
+            
+            count = len(docs)
+            to_extract = len([d for d in docs if d.extract_type == 'full'])
+            size = sum(d.size_mb for d in docs)
+            
+            total += count
+            total_to_extract += to_extract
+            total_size += size
+            
+            print(f"{category.upper().replace('_', ' ')}:")
+            print(f"   Documents: {count}")
+            print(f"   To extract: {to_extract} (full text)")
+            print(f"   To list: {count - to_extract} (reference only)")
+            print(f"   Size: {size:.1f} MB")
+            
+            if docs and category != 'legal_authorities':
+                print(f"   Files:")
+                for doc in docs[:5]:
+                    print(f"      • {doc.filename[:60]}")
+                if len(docs) > 5:
+                    print(f"      ... and {len(docs)-5} more")
+            
+            elif docs and category == 'legal_authorities':
+                print(f"   Sample files (not extracting):")
+                for doc in docs[:3]:
+                    print(f"      • {doc.filename[:60]}")
+                if len(docs) > 3:
+                    print(f"      ... and {len(docs)-3} more")
+            
+            print()
+        
+        print(f"{'='*70}")
+        print(f"TOTAL DOCUMENTS: {total}")
+        print(f"   Total found: {total_docs}")
+        print(f"   Skipped (drafts/duplicates): {skipped_docs}")
+        print(f"   Skipped (exhibit subfolders): {skipped_exhibits}")
+        print(f"   Selected: {total}")
+        print(f"   To extract (full text): {total_to_extract} ({total_size:.1f} MB)")
+        print(f"   To list (reference): {total - total_to_extract}")
+        print(f"{'='*70}\n")
+
+
+def main():
+    """Test document selector"""
+    
+    from folder_classifier import FolderClassifier
+    
+    # Test on your case
+    root_path = Path(r"C:\Users\JemAndrew\Velitor\Communication site - Documents\LIS1.1")
+    
+    # First classify folders
+    classifier = FolderClassifier(root_path)
+    organised = classifier.get_folders_for_bible()
+    
+    # Get all classifications
+    to_process = (organised['critical'] + organised['high'] + 
+                  organised['medium'] + organised['legal_authorities'])
+    
+    # Select documents
+    selector = DocumentSelector()
+    selected = selector.select_for_bible_building(to_process)
+    
+    # Show what we'll extract vs list
+    print("\n" + "="*70)
+    print("READY FOR BIBLE BUILDING")
+    print("="*70)
+    
+    extract_count = sum(len([d for d in docs if d.extract_type == 'full']) 
+                       for docs in selected.values())
+    list_count = sum(len([d for d in docs if d.extract_type == 'list']) 
+                    for docs in selected.values())
+    
+    print(f"\n✅ {extract_count} documents will be extracted (full text)")
+    print(f"📚 {list_count} documents will be listed (reference only)")
+    print(f"\nThis saves extracting hundreds of exhibits while still noting their existence!")
+
+
+if __name__ == '__main__':
+    main()
+,         # R-1.pdf (respondent exhibits)
+        r'^R\d-\d+\.pdf
+    
+    def __init__(self):
+        """Initialise document selector"""
+        pass
+    
+    def _is_exhibit_subfolder(self, path: Path, parent_folder: Path) -> bool:
+        """
+        Check if path is inside an exhibit subfolder
+        
+        Args:
+            path: File path to check
+            parent_folder: Parent folder path
+            
+        Returns:
+            True if file is inside an exhibit subfolder
+        """
+        # Get relative path from parent
+        try:
+            rel_path = path.relative_to(parent_folder)
+        except ValueError:
+            return False
+        
+        # Check if any part of the path matches exhibit patterns
+        for part in rel_path.parts[:-1]:  # Exclude filename itself
+            for pattern in self.EXHIBIT_SUBFOLDER_PATTERNS:
+                if re.search(pattern, part, re.IGNORECASE):
+                    return True
+        
+        return False
+    
+    def _is_critical_excel(self, filename: str) -> bool:
+        """
+        Check if Excel file is critical for Bible
+        
+        Args:
+            filename: Name of file to check
+            
+        Returns:
+            True if Excel file is critical (never skip)
+        """
+        # Check if it's an Excel file
+        if not any(filename.lower().endswith(ext) for ext in self.EXCEL_EXTENSIONS):
+            return False
+        
+        # Check if matches critical patterns
+        for pattern in self.CRITICAL_EXCEL_PATTERNS:
+            if re.search(pattern, filename, re.IGNORECASE):
+                return True
+        
+        return False
+    
+    def _should_skip_document(self, doc_path: Path) -> Tuple[bool, str]:
+        """
+        Determine if document should be skipped
+        
+        Args:
+            doc_path: Path to document
+            
+        Returns:
+            (should_skip, reason)
+        """
+        
+        filename = doc_path.name
+        
+        # NEVER skip critical Excel files
+        if self._is_critical_excel(filename):
+            return False, "Critical Excel index file"
+        
+        # Check SKIP patterns first
+        for pattern in self.SKIP_PATTERNS:
+            if re.search(pattern, filename, re.IGNORECASE):
+                return True, f"Skip pattern matched: {pattern}"
+        
+        # Check DRAFT patterns
+        for pattern in self.DRAFT_PATTERNS:
+            if re.search(pattern, filename, re.IGNORECASE):
+                # Check if there's a non-draft version
+                parent = doc_path.parent
+                base_name = re.sub(r'(draft|v\d+|version\s+\d+)', '', filename, flags=re.IGNORECASE)
+                base_name = re.sub(r'\s+', ' ', base_name).strip()
+                
+                # Look for potential master version
+                for sibling in parent.glob('*'):
+                    if sibling == doc_path:
+                        continue
+                    if base_name.lower() in sibling.name.lower():
+                        if not any(re.search(p, sibling.name, re.IGNORECASE) for p in self.DRAFT_PATTERNS):
+                            return True, f"Draft version - master exists: {sibling.name}"
+                
+                # No master found, but still probably a draft
+                return True, "Draft version (no master found, but marked as draft)"
+        
+        # Check file extension
+        if not any(filename.lower().endswith(ext) for ext in self.EXTRACTABLE_EXTENSIONS):
+            return True, f"Unsupported file type: {doc_path.suffix}"
+        
+        return False, "Selected"
+    
+    def _get_extraction_type(self, classification, doc_path: Path) -> str:
+        """
+        Determine extraction type based on folder classification and document
+        
+        Args:
+            classification: FolderClassification object
+            doc_path: Path to document
+            
+        Returns:
+            'full', 'summary', or 'list'
+        """
+        
+        filename = doc_path.name
+        category = classification.category
+        
+        # Legal authorities: List only
+        if category == 'legal_authorities':
+            return 'list'
+        
+        # Indices: Always full extraction
+        if category == 'index':
+            return 'full'
+        
+        # Core pleadings: Always full extraction
+        if category in ['pleadings', 'bible_essential']:
+            return 'full'
+        
+        # Trial witnesses: Always full extraction
+        if category == 'trial_witnesses':
+            return 'full'
+        
+        # Late disclosure: Full extraction (smoking guns)
+        if category == 'late_disclosure':
+            # Check if it's an index/summary or actual document
+            if 'index' in filename.lower() or 'list' in filename.lower():
+                return 'full'
+            # Individual late disclosure docs go to vector store, not Bible
+            return 'list'
+        
+        # Procedural orders: Full extraction (usually short)
+        if category == 'procedural':
+            return 'full'
+        
+        # Everything else: List only (will be in vector store)
+        return 'list'
+    
+    def _get_priority(self, classification, doc_path: Path) -> int:
+        """
+        Get priority score (1-10) for document
+        
+        Args:
+            classification: FolderClassification object
+            doc_path: Path to document
+            
+        Returns:
+            Priority score (10 = highest)
+        """
+        
+        filename = doc_path.name.lower()
+        category = classification.category
+        
+        # Critical documents
+        if category in ['pleadings', 'bible_essential']:
+            return 10
+        
+        # Indices
+        if category == 'index':
+            return 9
+        
+        # Trial witnesses
+        if category == 'trial_witnesses':
+            return 9
+        
+        # Late disclosure summaries
+        if category == 'late_disclosure':
+            if 'index' in filename or 'list' in filename or 'summary' in filename:
+                return 8
+            return 5
+        
+        # Procedural orders
+        if category == 'procedural':
+            return 7
+        
+        # Everything else
+        return 5
+    
+    def select_for_bible_building(
+        self,
+        folder_classifications: List
+    ) -> Dict[str, List[Document]]:
+        """
+        Select documents from classified folders
+        
+        Args:
+            folder_classifications: List of FolderClassification objects
+            
+        Returns:
+            Dict of documents by category
+        """
+        
+        print(f"\n{'='*70}")
+        print("DOCUMENT SELECTION FOR BIBLE BUILDING")
+        print(f"{'='*70}\n")
+        
+        selected = {
+            'pleadings': [],
+            'indices': [],
+            'trial_witnesses': [],
+            'late_disclosure': [],
+            'procedural': [],
+            'legal_authorities': [],
+            'other': []
+        }
+        
+        total_docs = 0
+        skipped_docs = 0
+        skipped_exhibits = 0
+        
+        for classification in folder_classifications:
+            if not classification.should_read_for_bible:
+                continue
+            
+            folder_path = classification.path
+            category = classification.category
+            
+            # Map category to selection dict key
+            if category in ['pleadings', 'bible_essential']:
+                target_key = 'pleadings'
+            elif category == 'index':
+                target_key = 'indices'
+            elif category == 'trial_witnesses':
+                target_key = 'trial_witnesses'
+            elif category == 'late_disclosure':
+                target_key = 'late_disclosure'
+            elif category == 'procedural':
+                target_key = 'procedural'
+            elif category == 'legal_authorities':
+                target_key = 'legal_authorities'
+            else:
+                target_key = 'other'
+            
+            # ═══════════════════════════════════════════════════════════
+            # CRITICAL FIX: For pleadings and indices folders, ONLY get top-level files
+            # Skip exhibit subfolders entirely (C-XX, FA-XX, CLA-XX, etc.)
+            # ═══════════════════════════════════════════════════════════
+            if category in ['pleadings', 'bible_essential', 'index', 'indices']:
+                # Only get files directly in this folder (not subfolders)
+                file_iterator = folder_path.glob('*')
+                print(f"   [Scanning top-level only: {classification.name}]")
+            else:
+                # For other categories, recursive is fine
+                file_iterator = folder_path.rglob('*')
+            
+            for doc_path in file_iterator:
+                if not doc_path.is_file():
+                    continue
+                
+                total_docs += 1
+                
+                # Check if inside exhibit subfolder
+                if self._is_exhibit_subfolder(doc_path, folder_path):
+                    skipped_exhibits += 1
+                    continue
+                
+                # Check if should skip
+                should_skip, reason = self._should_skip_document(doc_path)
+                
+                if should_skip:
+                    skipped_docs += 1
+                    continue
+                
+                # Get extraction type and priority
+                extract_type = self._get_extraction_type(classification, doc_path)
+                priority = self._get_priority(classification, doc_path)
+                
+                # Calculate size
+                size_mb = doc_path.stat().st_size / (1024 * 1024)
+                
+                # Create Document object
+                doc = Document(
+                    path=doc_path,
+                    filename=doc_path.name,
+                    folder_name=classification.name,
+                    size_mb=size_mb,
+                    extract_type=extract_type,
+                    priority=priority,
+                    reason=f"Selected from {category}"
+                )
+                
+                selected[target_key].append(doc)
+        
+        # Sort each category by priority
+        for key in selected:
+            selected[key].sort(key=lambda x: x.priority, reverse=True)
+        
+        # Print summary
+        self._print_selection_summary(selected, total_docs, skipped_docs, skipped_exhibits)
+        
+        return selected
+    
+    def _print_selection_summary(
+        self,
+        selected: Dict[str, List[Document]],
+        total_docs: int,
+        skipped_docs: int,
+        skipped_exhibits: int
+    ) -> None:
+        """Print selection summary"""
+        
+        print(f"\n{'='*70}")
+        print("DOCUMENT SELECTION SUMMARY")
+        print(f"{'='*70}\n")
+        
+        total = 0
+        total_to_extract = 0
+        total_size = 0.0
+        
+        for category, docs in selected.items():
+            if not docs:
+                continue
+            
+            count = len(docs)
+            to_extract = len([d for d in docs if d.extract_type == 'full'])
+            size = sum(d.size_mb for d in docs)
+            
+            total += count
+            total_to_extract += to_extract
+            total_size += size
+            
+            print(f"{category.upper().replace('_', ' ')}:")
+            print(f"   Documents: {count}")
+            print(f"   To extract: {to_extract} (full text)")
+            print(f"   To list: {count - to_extract} (reference only)")
+            print(f"   Size: {size:.1f} MB")
+            
+            if docs and category != 'legal_authorities':
+                print(f"   Files:")
+                for doc in docs[:5]:
+                    print(f"      • {doc.filename[:60]}")
+                if len(docs) > 5:
+                    print(f"      ... and {len(docs)-5} more")
+            
+            elif docs and category == 'legal_authorities':
+                print(f"   Sample files (not extracting):")
+                for doc in docs[:3]:
+                    print(f"      • {doc.filename[:60]}")
+                if len(docs) > 3:
+                    print(f"      ... and {len(docs)-3} more")
+            
+            print()
+        
+        print(f"{'='*70}")
+        print(f"TOTAL DOCUMENTS: {total}")
+        print(f"   Total found: {total_docs}")
+        print(f"   Skipped (drafts/duplicates): {skipped_docs}")
+        print(f"   Skipped (exhibit subfolders): {skipped_exhibits}")
+        print(f"   Selected: {total}")
+        print(f"   To extract (full text): {total_to_extract} ({total_size:.1f} MB)")
+        print(f"   To list (reference): {total - total_to_extract}")
+        print(f"{'='*70}\n")
+
+
+def main():
+    """Test document selector"""
+    
+    from folder_classifier import FolderClassifier
+    
+    # Test on your case
+    root_path = Path(r"C:\Users\JemAndrew\Velitor\Communication site - Documents\LIS1.1")
+    
+    # First classify folders
+    classifier = FolderClassifier(root_path)
+    organised = classifier.get_folders_for_bible()
+    
+    # Get all classifications
+    to_process = (organised['critical'] + organised['high'] + 
+                  organised['medium'] + organised['legal_authorities'])
+    
+    # Select documents
+    selector = DocumentSelector()
+    selected = selector.select_for_bible_building(to_process)
+    
+    # Show what we'll extract vs list
+    print("\n" + "="*70)
+    print("READY FOR BIBLE BUILDING")
+    print("="*70)
+    
+    extract_count = sum(len([d for d in docs if d.extract_type == 'full']) 
+                       for docs in selected.values())
+    list_count = sum(len([d for d in docs if d.extract_type == 'list']) 
+                    for docs in selected.values())
+    
+    print(f"\n✅ {extract_count} documents will be extracted (full text)")
+    print(f"📚 {list_count} documents will be listed (reference only)")
+    print(f"\nThis saves extracting hundreds of exhibits while still noting their existence!")
+
+
+if __name__ == '__main__':
+    main()
+,       # R1-1.pdf (respondent exhibits variant)
+    ]
+    
+    # Skip patterns (always skip)
+    SKIP_PATTERNS = [
+        r'cover.*spine',
+        r'do.*not.*use',
+        r'delete',
+        r'archive',
+        r'backup',
+        r'~\
+    
+    def __init__(self):
+        """Initialise document selector"""
+        pass
+    
+    def _is_exhibit_subfolder(self, path: Path, parent_folder: Path) -> bool:
+        """
+        Check if path is inside an exhibit subfolder
+        
+        Args:
+            path: File path to check
+            parent_folder: Parent folder path
+            
+        Returns:
+            True if file is inside an exhibit subfolder
+        """
+        # Get relative path from parent
+        try:
+            rel_path = path.relative_to(parent_folder)
+        except ValueError:
+            return False
+        
+        # Check if any part of the path matches exhibit patterns
+        for part in rel_path.parts[:-1]:  # Exclude filename itself
+            for pattern in self.EXHIBIT_SUBFOLDER_PATTERNS:
+                if re.search(pattern, part, re.IGNORECASE):
+                    return True
+        
+        return False
+    
+    def _is_critical_excel(self, filename: str) -> bool:
+        """
+        Check if Excel file is critical for Bible
+        
+        Args:
+            filename: Name of file to check
+            
+        Returns:
+            True if Excel file is critical (never skip)
+        """
+        # Check if it's an Excel file
+        if not any(filename.lower().endswith(ext) for ext in self.EXCEL_EXTENSIONS):
+            return False
+        
+        # Check if matches critical patterns
+        for pattern in self.CRITICAL_EXCEL_PATTERNS:
+            if re.search(pattern, filename, re.IGNORECASE):
+                return True
+        
+        return False
+    
+    def _should_skip_document(self, doc_path: Path) -> Tuple[bool, str]:
+        """
+        Determine if document should be skipped
+        
+        Args:
+            doc_path: Path to document
+            
+        Returns:
+            (should_skip, reason)
+        """
+        
+        filename = doc_path.name
+        
+        # NEVER skip critical Excel files
+        if self._is_critical_excel(filename):
+            return False, "Critical Excel index file"
+        
+        # Check SKIP patterns first
+        for pattern in self.SKIP_PATTERNS:
+            if re.search(pattern, filename, re.IGNORECASE):
+                return True, f"Skip pattern matched: {pattern}"
+        
+        # Check DRAFT patterns
+        for pattern in self.DRAFT_PATTERNS:
+            if re.search(pattern, filename, re.IGNORECASE):
+                # Check if there's a non-draft version
+                parent = doc_path.parent
+                base_name = re.sub(r'(draft|v\d+|version\s+\d+)', '', filename, flags=re.IGNORECASE)
+                base_name = re.sub(r'\s+', ' ', base_name).strip()
+                
+                # Look for potential master version
+                for sibling in parent.glob('*'):
+                    if sibling == doc_path:
+                        continue
+                    if base_name.lower() in sibling.name.lower():
+                        if not any(re.search(p, sibling.name, re.IGNORECASE) for p in self.DRAFT_PATTERNS):
+                            return True, f"Draft version - master exists: {sibling.name}"
+                
+                # No master found, but still probably a draft
+                return True, "Draft version (no master found, but marked as draft)"
+        
+        # Check file extension
+        if not any(filename.lower().endswith(ext) for ext in self.EXTRACTABLE_EXTENSIONS):
+            return True, f"Unsupported file type: {doc_path.suffix}"
+        
+        return False, "Selected"
+    
+    def _get_extraction_type(self, classification, doc_path: Path) -> str:
+        """
+        Determine extraction type based on folder classification and document
+        
+        Args:
+            classification: FolderClassification object
+            doc_path: Path to document
+            
+        Returns:
+            'full', 'summary', or 'list'
+        """
+        
+        filename = doc_path.name
+        category = classification.category
+        
+        # Legal authorities: List only
+        if category == 'legal_authorities':
+            return 'list'
+        
+        # Indices: Always full extraction
+        if category == 'index':
+            return 'full'
+        
+        # Core pleadings: Always full extraction
+        if category in ['pleadings', 'bible_essential']:
+            return 'full'
+        
+        # Trial witnesses: Always full extraction
+        if category == 'trial_witnesses':
+            return 'full'
+        
+        # Late disclosure: Full extraction (smoking guns)
+        if category == 'late_disclosure':
+            # Check if it's an index/summary or actual document
+            if 'index' in filename.lower() or 'list' in filename.lower():
+                return 'full'
+            # Individual late disclosure docs go to vector store, not Bible
+            return 'list'
+        
+        # Procedural orders: Full extraction (usually short)
+        if category == 'procedural':
+            return 'full'
+        
+        # Everything else: List only (will be in vector store)
+        return 'list'
+    
+    def _get_priority(self, classification, doc_path: Path) -> int:
+        """
+        Get priority score (1-10) for document
+        
+        Args:
+            classification: FolderClassification object
+            doc_path: Path to document
+            
+        Returns:
+            Priority score (10 = highest)
+        """
+        
+        filename = doc_path.name.lower()
+        category = classification.category
+        
+        # Critical documents
+        if category in ['pleadings', 'bible_essential']:
+            return 10
+        
+        # Indices
+        if category == 'index':
+            return 9
+        
+        # Trial witnesses
+        if category == 'trial_witnesses':
+            return 9
+        
+        # Late disclosure summaries
+        if category == 'late_disclosure':
+            if 'index' in filename or 'list' in filename or 'summary' in filename:
+                return 8
+            return 5
+        
+        # Procedural orders
+        if category == 'procedural':
+            return 7
+        
+        # Everything else
+        return 5
+    
+    def select_for_bible_building(
+        self,
+        folder_classifications: List
+    ) -> Dict[str, List[Document]]:
+        """
+        Select documents from classified folders
+        
+        Args:
+            folder_classifications: List of FolderClassification objects
+            
+        Returns:
+            Dict of documents by category
+        """
+        
+        print(f"\n{'='*70}")
+        print("DOCUMENT SELECTION FOR BIBLE BUILDING")
+        print(f"{'='*70}\n")
+        
+        selected = {
+            'pleadings': [],
+            'indices': [],
+            'trial_witnesses': [],
+            'late_disclosure': [],
+            'procedural': [],
+            'legal_authorities': [],
+            'other': []
+        }
+        
+        total_docs = 0
+        skipped_docs = 0
+        skipped_exhibits = 0
+        
+        for classification in folder_classifications:
+            if not classification.should_read_for_bible:
+                continue
+            
+            folder_path = classification.path
+            category = classification.category
+            
+            # Map category to selection dict key
+            if category in ['pleadings', 'bible_essential']:
+                target_key = 'pleadings'
+            elif category == 'index':
+                target_key = 'indices'
+            elif category == 'trial_witnesses':
+                target_key = 'trial_witnesses'
+            elif category == 'late_disclosure':
+                target_key = 'late_disclosure'
+            elif category == 'procedural':
+                target_key = 'procedural'
+            elif category == 'legal_authorities':
+                target_key = 'legal_authorities'
+            else:
+                target_key = 'other'
+            
+            # ═══════════════════════════════════════════════════════════
+            # CRITICAL FIX: For pleadings and indices folders, ONLY get top-level files
+            # Skip exhibit subfolders entirely (C-XX, FA-XX, CLA-XX, etc.)
+            # ═══════════════════════════════════════════════════════════
+            if category in ['pleadings', 'bible_essential', 'index', 'indices']:
+                # Only get files directly in this folder (not subfolders)
+                file_iterator = folder_path.glob('*')
+                print(f"   [Scanning top-level only: {classification.name}]")
+            else:
+                # For other categories, recursive is fine
+                file_iterator = folder_path.rglob('*')
+            
+            for doc_path in file_iterator:
+                if not doc_path.is_file():
+                    continue
+                
+                total_docs += 1
+                
+                # Check if inside exhibit subfolder
+                if self._is_exhibit_subfolder(doc_path, folder_path):
+                    skipped_exhibits += 1
+                    continue
+                
+                # Check if should skip
+                should_skip, reason = self._should_skip_document(doc_path)
+                
+                if should_skip:
+                    skipped_docs += 1
+                    continue
+                
+                # Get extraction type and priority
+                extract_type = self._get_extraction_type(classification, doc_path)
+                priority = self._get_priority(classification, doc_path)
+                
+                # Calculate size
+                size_mb = doc_path.stat().st_size / (1024 * 1024)
+                
+                # Create Document object
+                doc = Document(
+                    path=doc_path,
+                    filename=doc_path.name,
+                    folder_name=classification.name,
+                    size_mb=size_mb,
+                    extract_type=extract_type,
+                    priority=priority,
+                    reason=f"Selected from {category}"
+                )
+                
+                selected[target_key].append(doc)
+        
+        # Sort each category by priority
+        for key in selected:
+            selected[key].sort(key=lambda x: x.priority, reverse=True)
+        
+        # Print summary
+        self._print_selection_summary(selected, total_docs, skipped_docs, skipped_exhibits)
+        
+        return selected
+    
+    def _print_selection_summary(
+        self,
+        selected: Dict[str, List[Document]],
+        total_docs: int,
+        skipped_docs: int,
+        skipped_exhibits: int
+    ) -> None:
+        """Print selection summary"""
+        
+        print(f"\n{'='*70}")
+        print("DOCUMENT SELECTION SUMMARY")
+        print(f"{'='*70}\n")
+        
+        total = 0
+        total_to_extract = 0
+        total_size = 0.0
+        
+        for category, docs in selected.items():
+            if not docs:
+                continue
+            
+            count = len(docs)
+            to_extract = len([d for d in docs if d.extract_type == 'full'])
+            size = sum(d.size_mb for d in docs)
+            
+            total += count
+            total_to_extract += to_extract
+            total_size += size
+            
+            print(f"{category.upper().replace('_', ' ')}:")
+            print(f"   Documents: {count}")
+            print(f"   To extract: {to_extract} (full text)")
+            print(f"   To list: {count - to_extract} (reference only)")
+            print(f"   Size: {size:.1f} MB")
+            
+            if docs and category != 'legal_authorities':
+                print(f"   Files:")
+                for doc in docs[:5]:
+                    print(f"      • {doc.filename[:60]}")
+                if len(docs) > 5:
+                    print(f"      ... and {len(docs)-5} more")
+            
+            elif docs and category == 'legal_authorities':
+                print(f"   Sample files (not extracting):")
+                for doc in docs[:3]:
+                    print(f"      • {doc.filename[:60]}")
+                if len(docs) > 3:
+                    print(f"      ... and {len(docs)-3} more")
+            
+            print()
+        
+        print(f"{'='*70}")
+        print(f"TOTAL DOCUMENTS: {total}")
+        print(f"   Total found: {total_docs}")
+        print(f"   Skipped (drafts/duplicates): {skipped_docs}")
+        print(f"   Skipped (exhibit subfolders): {skipped_exhibits}")
+        print(f"   Selected: {total}")
+        print(f"   To extract (full text): {total_to_extract} ({total_size:.1f} MB)")
+        print(f"   To list (reference): {total - total_to_extract}")
+        print(f"{'='*70}\n")
+
+
+def main():
+    """Test document selector"""
+    
+    from folder_classifier import FolderClassifier
+    
+    # Test on your case
+    root_path = Path(r"C:\Users\JemAndrew\Velitor\Communication site - Documents\LIS1.1")
+    
+    # First classify folders
+    classifier = FolderClassifier(root_path)
+    organised = classifier.get_folders_for_bible()
+    
+    # Get all classifications
+    to_process = (organised['critical'] + organised['high'] + 
+                  organised['medium'] + organised['legal_authorities'])
+    
+    # Select documents
+    selector = DocumentSelector()
+    selected = selector.select_for_bible_building(to_process)
+    
+    # Show what we'll extract vs list
+    print("\n" + "="*70)
+    print("READY FOR BIBLE BUILDING")
+    print("="*70)
+    
+    extract_count = sum(len([d for d in docs if d.extract_type == 'full']) 
+                       for docs in selected.values())
+    list_count = sum(len([d for d in docs if d.extract_type == 'list']) 
+                    for docs in selected.values())
+    
+    print(f"\n✅ {extract_count} documents will be extracted (full text)")
+    print(f"📚 {list_count} documents will be listed (reference only)")
+    print(f"\nThis saves extracting hundreds of exhibits while still noting their existence!")
+
+
+if __name__ == '__main__':
+    main()
+,  # Temp Word files
+    ]
+    
+    def __init__(self):
+        """Initialise document selector"""
+        pass
+    
+    def _is_exhibit_subfolder(self, path: Path, parent_folder: Path) -> bool:
+        """
+        Check if path is inside an exhibit subfolder
+        
+        Args:
+            path: File path to check
+            parent_folder: Parent folder path
+            
+        Returns:
+            True if file is inside an exhibit subfolder
+        """
+        # Get relative path from parent
+        try:
+            rel_path = path.relative_to(parent_folder)
+        except ValueError:
+            return False
+        
+        # Check if any part of the path matches exhibit patterns
+        for part in rel_path.parts[:-1]:  # Exclude filename itself
+            for pattern in self.EXHIBIT_SUBFOLDER_PATTERNS:
+                if re.search(pattern, part, re.IGNORECASE):
+                    return True
+        
+        return False
+    
+    def _is_critical_excel(self, filename: str) -> bool:
+        """
+        Check if Excel file is critical for Bible
+        
+        Args:
+            filename: Name of file to check
+            
+        Returns:
+            True if Excel file is critical (never skip)
+        """
+        # Check if it's an Excel file
+        if not any(filename.lower().endswith(ext) for ext in self.EXCEL_EXTENSIONS):
+            return False
+        
+        # Check if matches critical patterns
+        for pattern in self.CRITICAL_EXCEL_PATTERNS:
+            if re.search(pattern, filename, re.IGNORECASE):
+                return True
+        
+        return False
+    
+    def _should_skip_document(self, doc_path: Path) -> Tuple[bool, str]:
+        """
+        Determine if document should be skipped
+        
+        Args:
+            doc_path: Path to document
+            
+        Returns:
+            (should_skip, reason)
+        """
+        
+        filename = doc_path.name
+        
+        # NEVER skip critical Excel files
+        if self._is_critical_excel(filename):
+            return False, "Critical Excel index file"
+        
+        # Check SKIP patterns first
+        for pattern in self.SKIP_PATTERNS:
+            if re.search(pattern, filename, re.IGNORECASE):
+                return True, f"Skip pattern matched: {pattern}"
+        
+        # Check DRAFT patterns
+        for pattern in self.DRAFT_PATTERNS:
+            if re.search(pattern, filename, re.IGNORECASE):
+                # Check if there's a non-draft version
+                parent = doc_path.parent
+                base_name = re.sub(r'(draft|v\d+|version\s+\d+)', '', filename, flags=re.IGNORECASE)
+                base_name = re.sub(r'\s+', ' ', base_name).strip()
+                
+                # Look for potential master version
+                for sibling in parent.glob('*'):
+                    if sibling == doc_path:
+                        continue
+                    if base_name.lower() in sibling.name.lower():
+                        if not any(re.search(p, sibling.name, re.IGNORECASE) for p in self.DRAFT_PATTERNS):
+                            return True, f"Draft version - master exists: {sibling.name}"
+                
+                # No master found, but still probably a draft
+                return True, "Draft version (no master found, but marked as draft)"
+        
+        # Check file extension
+        if not any(filename.lower().endswith(ext) for ext in self.EXTRACTABLE_EXTENSIONS):
+            return True, f"Unsupported file type: {doc_path.suffix}"
+        
+        return False, "Selected"
+    
+    def _get_extraction_type(self, classification, doc_path: Path) -> str:
+        """
+        Determine extraction type based on folder classification and document
+        
+        Args:
+            classification: FolderClassification object
+            doc_path: Path to document
+            
+        Returns:
+            'full', 'summary', or 'list'
+        """
+        
+        filename = doc_path.name
+        category = classification.category
+        
+        # Legal authorities: List only
+        if category == 'legal_authorities':
+            return 'list'
+        
+        # Indices: Always full extraction
+        if category == 'index':
+            return 'full'
+        
+        # Core pleadings: Always full extraction
+        if category in ['pleadings', 'bible_essential']:
+            return 'full'
+        
+        # Trial witnesses: Always full extraction
+        if category == 'trial_witnesses':
+            return 'full'
+        
+        # Late disclosure: Full extraction (smoking guns)
+        if category == 'late_disclosure':
+            # Check if it's an index/summary or actual document
+            if 'index' in filename.lower() or 'list' in filename.lower():
+                return 'full'
+            # Individual late disclosure docs go to vector store, not Bible
+            return 'list'
+        
+        # Procedural orders: Full extraction (usually short)
+        if category == 'procedural':
+            return 'full'
+        
+        # Everything else: List only (will be in vector store)
+        return 'list'
+    
+    def _get_priority(self, classification, doc_path: Path) -> int:
+        """
+        Get priority score (1-10) for document
+        
+        Args:
+            classification: FolderClassification object
+            doc_path: Path to document
+            
+        Returns:
+            Priority score (10 = highest)
+        """
+        
+        filename = doc_path.name.lower()
+        category = classification.category
+        
+        # Critical documents
+        if category in ['pleadings', 'bible_essential']:
+            return 10
+        
+        # Indices
+        if category == 'index':
+            return 9
+        
+        # Trial witnesses
+        if category == 'trial_witnesses':
+            return 9
+        
+        # Late disclosure summaries
+        if category == 'late_disclosure':
+            if 'index' in filename or 'list' in filename or 'summary' in filename:
+                return 8
+            return 5
+        
+        # Procedural orders
+        if category == 'procedural':
+            return 7
+        
+        # Everything else
+        return 5
+    
+    def select_for_bible_building(
+        self,
+        folder_classifications: List
+    ) -> Dict[str, List[Document]]:
+        """
+        Select documents from classified folders
+        
+        Args:
+            folder_classifications: List of FolderClassification objects
+            
+        Returns:
+            Dict of documents by category
+        """
+        
+        print(f"\n{'='*70}")
+        print("DOCUMENT SELECTION FOR BIBLE BUILDING")
+        print(f"{'='*70}\n")
+        
+        selected = {
+            'pleadings': [],
+            'indices': [],
+            'trial_witnesses': [],
+            'late_disclosure': [],
+            'procedural': [],
+            'legal_authorities': [],
+            'other': []
+        }
+        
+        total_docs = 0
+        skipped_docs = 0
+        skipped_exhibits = 0
+        
+        for classification in folder_classifications:
+            if not classification.should_read_for_bible:
+                continue
+            
+            folder_path = classification.path
+            category = classification.category
+            
+            # Map category to selection dict key
+            if category in ['pleadings', 'bible_essential']:
+                target_key = 'pleadings'
+            elif category == 'index':
+                target_key = 'indices'
+            elif category == 'trial_witnesses':
+                target_key = 'trial_witnesses'
+            elif category == 'late_disclosure':
+                target_key = 'late_disclosure'
+            elif category == 'procedural':
+                target_key = 'procedural'
+            elif category == 'legal_authorities':
+                target_key = 'legal_authorities'
+            else:
+                target_key = 'other'
+            
+            # ═══════════════════════════════════════════════════════════
+            # CRITICAL FIX: For pleadings and indices folders, ONLY get top-level files
+            # Skip exhibit subfolders entirely (C-XX, FA-XX, CLA-XX, etc.)
+            # ═══════════════════════════════════════════════════════════
+            if category in ['pleadings', 'bible_essential', 'index', 'indices']:
+                # Only get files directly in this folder (not subfolders)
+                file_iterator = folder_path.glob('*')
+                print(f"   [Scanning top-level only: {classification.name}]")
+            else:
+                # For other categories, recursive is fine
+                file_iterator = folder_path.rglob('*')
+            
+            for doc_path in file_iterator:
+                if not doc_path.is_file():
+                    continue
+                
+                total_docs += 1
+                
+                # Check if inside exhibit subfolder
+                if self._is_exhibit_subfolder(doc_path, folder_path):
+                    skipped_exhibits += 1
+                    continue
+                
+                # Check if should skip
+                should_skip, reason = self._should_skip_document(doc_path)
+                
+                if should_skip:
+                    skipped_docs += 1
+                    continue
+                
+                # Get extraction type and priority
+                extract_type = self._get_extraction_type(classification, doc_path)
+                priority = self._get_priority(classification, doc_path)
+                
+                # Calculate size
+                size_mb = doc_path.stat().st_size / (1024 * 1024)
+                
+                # Create Document object
+                doc = Document(
+                    path=doc_path,
+                    filename=doc_path.name,
+                    folder_name=classification.name,
+                    size_mb=size_mb,
+                    extract_type=extract_type,
+                    priority=priority,
+                    reason=f"Selected from {category}"
+                )
+                
+                selected[target_key].append(doc)
+        
+        # Sort each category by priority
+        for key in selected:
+            selected[key].sort(key=lambda x: x.priority, reverse=True)
+        
+        # Print summary
+        self._print_selection_summary(selected, total_docs, skipped_docs, skipped_exhibits)
+        
+        return selected
+    
+    def _print_selection_summary(
+        self,
+        selected: Dict[str, List[Document]],
+        total_docs: int,
+        skipped_docs: int,
+        skipped_exhibits: int
+    ) -> None:
+        """Print selection summary"""
+        
+        print(f"\n{'='*70}")
+        print("DOCUMENT SELECTION SUMMARY")
+        print(f"{'='*70}\n")
+        
+        total = 0
+        total_to_extract = 0
+        total_size = 0.0
+        
+        for category, docs in selected.items():
+            if not docs:
+                continue
+            
+            count = len(docs)
+            to_extract = len([d for d in docs if d.extract_type == 'full'])
+            size = sum(d.size_mb for d in docs)
+            
+            total += count
+            total_to_extract += to_extract
+            total_size += size
+            
+            print(f"{category.upper().replace('_', ' ')}:")
+            print(f"   Documents: {count}")
+            print(f"   To extract: {to_extract} (full text)")
+            print(f"   To list: {count - to_extract} (reference only)")
+            print(f"   Size: {size:.1f} MB")
+            
+            if docs and category != 'legal_authorities':
+                print(f"   Files:")
+                for doc in docs[:5]:
+                    print(f"      • {doc.filename[:60]}")
+                if len(docs) > 5:
+                    print(f"      ... and {len(docs)-5} more")
+            
+            elif docs and category == 'legal_authorities':
+                print(f"   Sample files (not extracting):")
+                for doc in docs[:3]:
+                    print(f"      • {doc.filename[:60]}")
+                if len(docs) > 3:
+                    print(f"      ... and {len(docs)-3} more")
+            
+            print()
+        
+        print(f"{'='*70}")
+        print(f"TOTAL DOCUMENTS: {total}")
+        print(f"   Total found: {total_docs}")
+        print(f"   Skipped (drafts/duplicates): {skipped_docs}")
+        print(f"   Skipped (exhibit subfolders): {skipped_exhibits}")
+        print(f"   Selected: {total}")
+        print(f"   To extract (full text): {total_to_extract} ({total_size:.1f} MB)")
+        print(f"   To list (reference): {total - total_to_extract}")
+        print(f"{'='*70}\n")
+
+
+def main():
+    """Test document selector"""
+    
+    from folder_classifier import FolderClassifier
+    
+    # Test on your case
+    root_path = Path(r"C:\Users\JemAndrew\Velitor\Communication site - Documents\LIS1.1")
+    
+    # First classify folders
+    classifier = FolderClassifier(root_path)
+    organised = classifier.get_folders_for_bible()
+    
+    # Get all classifications
+    to_process = (organised['critical'] + organised['high'] + 
+                  organised['medium'] + organised['legal_authorities'])
+    
+    # Select documents
+    selector = DocumentSelector()
+    selected = selector.select_for_bible_building(to_process)
+    
+    # Show what we'll extract vs list
+    print("\n" + "="*70)
+    print("READY FOR BIBLE BUILDING")
+    print("="*70)
+    
+    extract_count = sum(len([d for d in docs if d.extract_type == 'full']) 
+                       for docs in selected.values())
+    list_count = sum(len([d for d in docs if d.extract_type == 'list']) 
+                    for docs in selected.values())
+    
+    print(f"\n✅ {extract_count} documents will be extracted (full text)")
+    print(f"📚 {list_count} documents will be listed (reference only)")
+    print(f"\nThis saves extracting hundreds of exhibits while still noting their existence!")
 
 
 if __name__ == '__main__':

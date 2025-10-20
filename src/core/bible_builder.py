@@ -237,58 +237,51 @@ class BibleBuilder:
                             'text': text,
                             'category': category,
                             'folder': doc.folder_name,
-                            'path': str(doc.path)
+                            'size_mb': doc.size_mb
                         }
                         extracted_count += 1
-                        print(f"      ✅ Extracted ({len(text):,} chars)")
-                    else:
-                        print(f"      ⚠️  No text extracted")
-                
+                    
                 except Exception as e:
-                    print(f"      ❌ Error: {e}")
+                    print(f"      ⚠️  Failed to extract: {e}")
         
-        print(f"\n✅ Extracted {extracted_count} documents")
-        print(f"📚 Noted {len(self.legal_authorities_list)} legal authorities")
+        print(f"\n✅ Extracted {extracted_count}/{total_to_extract} documents")
     
     def _extract_text_from_file(self, file_path: Path) -> str:
         """
-        Extract text from a file (PDF or DOCX)
+        Extract text from PDF or DOCX file
         
         Args:
-            file_path: Path to file
+            file_path: Path to document
         
         Returns:
             Extracted text
         """
         
-        if not file_path.exists():
-            raise FileNotFoundError(f"File not found: {file_path}")
-        
-        suffix = file_path.suffix.lower()
-        
-        if suffix == '.pdf':
-            return self._extract_from_pdf(file_path)
-        elif suffix in ['.docx', '.doc']:
-            return self._extract_from_docx(file_path)
+        if str(file_path).lower().endswith('.pdf'):
+            return self._extract_pdf(file_path)
+        elif str(file_path).lower().endswith(('.doc', '.docx')):
+            return self._extract_docx(file_path)
+        elif str(file_path).lower().endswith(('.xlsx', '.xls', '.xlsm')):
+            # For Excel files, just note them (don't extract - too complex)
+            return f"[Excel file: {file_path.name}]"
         else:
-            raise ValueError(f"Unsupported file type: {suffix}")
+            raise ValueError(f"Unsupported file type: {file_path.suffix}")
     
-    def _extract_from_pdf(self, file_path: Path) -> str:
+    def _extract_pdf(self, file_path: Path) -> str:
         """Extract text from PDF"""
         
         try:
-            text = ""
-            with open(file_path, 'rb') as file:
-                reader = PyPDF2.PdfReader(file)
+            with open(file_path, 'rb') as f:
+                reader = PyPDF2.PdfReader(f)
+                text = ""
                 for page in reader.pages:
                     text += page.extract_text() + "\n"
-            
-            return text.strip()
+                return text.strip()
         
         except Exception as e:
             raise Exception(f"PDF extraction failed: {e}")
     
-    def _extract_from_docx(self, file_path: Path) -> str:
+    def _extract_docx(self, file_path: Path) -> str:
         """Extract text from DOCX"""
         
         try:
@@ -312,6 +305,7 @@ class BibleBuilder:
         # Organize extracted texts by category
         pleadings = {}
         indices = {}
+        witness_statements_text = ""
         late_disclosure_context = ""
         tribunal_rulings = ""
         
@@ -338,47 +332,38 @@ class BibleBuilder:
                     indices['claimant'] = text
                 elif 'respondent' in filename.lower() or 'first respondent' in filename.lower():
                     indices['respondent'] = text
-                else:
-                    indices['other'] = text
+                elif 'consolidated' in filename.lower():
+                    indices['consolidated'] = text
+                elif 'hyperlink' in filename.lower():
+                    indices['hyperlinked'] = text
+                elif 'trial bundle' in filename.lower():
+                    indices['trial_bundle'] = text
+            
+            elif category == 'trial_witnesses':
+                # Accumulate all trial witness statements
+                witness_statements_text += f"\n\n{'='*70}\n"
+                witness_statements_text += f"WITNESS STATEMENT: {filename}\n"
+                witness_statements_text += f"{'='*70}\n\n"
+                witness_statements_text += text[:20000]  # Limit each statement to 20K chars
             
             elif category == 'late_disclosure':
-                # Sample of late disclosure
-                if not late_disclosure_context:
-                    late_disclosure_context = f"Sample documents from Folder 69 (15 Sep 2025 late disclosure):\n\n"
-                
-                late_disclosure_context += f"[{filename}]\n{text[:2000]}...\n\n"
+                # Accumulate late disclosure context
+                late_disclosure_context += f"\n\n{filename}:\n{text[:10000]}"
             
             elif category == 'procedural':
-                # Tribunal rulings
-                tribunal_rulings += f"\n[{filename}]\n{text[:1500]}...\n\n"
+                # Accumulate tribunal rulings
+                tribunal_rulings += f"\n\n{filename}:\n{text[:10000]}"
         
-        # Add legal authorities summary
-        if self.legal_authorities_list:
-            legal_auth_summary = "\n\nLEGAL AUTHORITIES REFERENCED:\n"
-            legal_auth_summary += f"Total: {len(self.legal_authorities_list)} documents\n\n"
-            
-            # Group by folder
-            by_folder = {}
-            for auth in self.legal_authorities_list:
-                folder = auth['folder']
-                if folder not in by_folder:
-                    by_folder[folder] = []
-                by_folder[folder].append(auth['filename'])
-            
-            for folder, files in by_folder.items():
-                legal_auth_summary += f"\n{folder}:\n"
-                for file in files[:20]:  # Show first 20
-                    legal_auth_summary += f"• {file}\n"
-                if len(files) > 20:
-                    legal_auth_summary += f"... and {len(files)-20} more\n"
-            
-            late_disclosure_context += "\n" + legal_auth_summary
-        
-        # Generate prompt using BiblePrompts
-        prompt = self.prompts.generate_bible_prompt(
+        # Build complete prompt using the prompts module
+        prompt = self.prompts.get_bible_generation_prompt(
+            case_name=self.case_name,
+            claimant=self.claimant,
+            respondent=self.respondent,
+            tribunal=self.tribunal,
             pleadings=pleadings,
             indices=indices,
-            late_disclosure_context=late_disclosure_context or "No late disclosure sampled.",
+            witness_statements=witness_statements_text or "No trial witness statements extracted.",
+            late_disclosure_context=late_disclosure_context or "No late disclosure context extracted.",
             tribunal_rulings=tribunal_rulings or "No tribunal rulings extracted."
         )
         
@@ -403,16 +388,27 @@ class BibleBuilder:
         print(f"   Extended thinking: {'✅ YES' if use_extended_thinking else '❌ NO'}")
         
         # Estimate cost with accurate token counting
-        print(f"\n📊 Counting tokens...")
-        estimate = self.claude.estimate_cost_with_token_count(
-            text=prompt,
-            output_tokens=32000,
-            model='claude-sonnet-4-5-20250929'
-        )
+        print(f"\n📊 Counting tokens using Anthropic API...")
         
-        print(f"   Input tokens: {estimate['input_tokens']:,}")
-        print(f"   Expected output tokens: {estimate['output_tokens']:,}")
-        print(f"   💰 Estimated cost: £{estimate['gbp']:.2f}")
+        try:
+            estimate = self.claude.estimate_cost_with_token_count(
+                text=prompt,
+                output_tokens=32000,
+                model='claude-sonnet-4-5-20250929'
+            )
+            
+            print(f"   Input tokens: {estimate['input_tokens']:,}")
+            print(f"   Expected output tokens: {estimate['output_tokens']:,}")
+            print(f"   💰 Estimated cost: £{estimate['gbp']:.2f}")
+        
+        except Exception as e:
+            print(f"   ⚠️  Token counting failed: {e}")
+            print(f"   Using fallback estimation...")
+            estimate = self.claude.estimate_cost_simple(
+                input_text=prompt,
+                output_tokens=32000
+            )
+            print(f"   💰 Estimated cost: £{estimate['gbp']:.2f}")
         
         # Confirm
         confirm = input("\n   Proceed with Bible generation? (y/n): ")
@@ -456,7 +452,7 @@ class BibleBuilder:
                 'cache_control': {'type': 'ephemeral'}  # Cache system prompt
             }],
             max_tokens=32000,
-            temperature=0.0,  # ← DETERMINISTIC for factual extraction!
+            temperature=0.0,  # ← DETERMINISTIC for factual extraction
             thinking=thinking_config
         )
         
