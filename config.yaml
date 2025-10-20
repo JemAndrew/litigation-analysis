@@ -1,0 +1,93 @@
+# Case Bible Builder Configuration
+# 
+# Edit this file with your case details and paths
+# British English throughout
+
+# ═══════════════════════════════════════════════════════════════════
+# CASE INFORMATION
+# ═══════════════════════════════════════════════════════════════════
+
+case_id: lismore_v_ph
+case_name: Lismore Capital Limited v Process Holdings Limited
+claimant: Lismore Capital Limited
+respondent: Process Holdings Limited (PH)
+tribunal: LCIA
+
+# ═══════════════════════════════════════════════════════════════════
+# PATHS (✅ ALREADY CONFIGURED FOR YOUR SYSTEM!)
+# ═══════════════════════════════════════════════════════════════════
+
+# Root directory containing all case folders (74 folders with 23,994 files)
+case_root: C:\Users\JemAndrew\Velitor\Communication site - Documents\LIS1.1
+
+# Output directory (where Bible will be saved)
+# If not specified, defaults to: cases/{case_id}/
+output_dir: null
+
+# ═══════════════════════════════════════════════════════════════════
+# BIBLE BUILD SETTINGS
+# ═══════════════════════════════════════════════════════════════════
+
+# Use Claude's extended thinking (recommended for better analysis)
+use_extended_thinking: true
+
+# Maximum cost in GBP before requiring confirmation
+max_cost_gbp: 5.0
+
+# Number of pages to extract for text similarity checks
+pages_to_extract_per_doc: 3
+
+# DPI for image extraction (if needed for vision comparison)
+image_dpi: 150
+
+# ═══════════════════════════════════════════════════════════════════
+# CLASSIFICATION OVERRIDES (Optional)
+# ═══════════════════════════════════════════════════════════════════
+
+# Skip folders from other proceedings/arbitrations
+skip_other_proceedings: true
+
+# Extract full text from legal authorities (false = note existence only)
+extract_legal_authorities: false
+
+# Include general correspondence folders
+include_correspondence: false
+
+# ═══════════════════════════════════════════════════════════════════
+# DOCUMENT SELECTION OVERRIDES (Optional)
+# ═══════════════════════════════════════════════════════════════════
+
+# Maximum file sizes by category (MB)
+max_file_size_mb:
+  pleadings: 100      # Core pleadings can be large
+  indices: 20         # Indices should be reasonable
+  trial_witnesses: 75 # Witness statements can be lengthy
+  procedural: 30      # Procedural orders
+  legal_authorities: 10
+  default: 50         # Fallback for other categories
+
+# Skip draft patterns (set to false to include drafts)
+skip_drafts: true
+
+# ═══════════════════════════════════════════════════════════════════
+# API SETTINGS
+# ═══════════════════════════════════════════════════════════════════
+
+# Model to use (don't change unless testing)
+model: claude-sonnet-4-5-20250929
+
+# Maximum output tokens for Bible generation
+max_output_tokens: 80000
+
+# Retry attempts for API failures
+max_retries: 3
+
+# ═══════════════════════════════════════════════════════════════════
+# RESUME CAPABILITY
+# ═══════════════════════════════════════════════════════════════════
+
+# Enable checkpoint/resume (saves progress after each step)
+enable_checkpoints: true
+
+# Checkpoint file location
+checkpoint_file: null  # Defaults to: cases/{case_id}/build_checkpoint.json
