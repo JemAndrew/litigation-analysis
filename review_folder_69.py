@@ -18,7 +18,7 @@ project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
 sys.path.insert(0, str(project_root / 'src'))
 
-from src.intelligence.reviewer import EnhancedFolder69Reviewer
+from src.intelligence.reviewer import Folder69Reviewer
 
 
 def main():
@@ -86,7 +86,7 @@ Analyses documents with detailed scoring and explanations.
     print("="*70 + "\n")
     
     try:
-        reviewer = EnhancedFolder69Reviewer(
+        reviewer = Folder69Reviewer(
             case_dir=case_dir,
             folder_69_path=folder_69_path,  # Direct OneDrive path
             matched_excel_path=matched_excel,

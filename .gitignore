@@ -11,6 +11,7 @@
 cases/
 Cases/
 case_data/
+Document_Matching/
 
 # Test data
 test_vector_store_data/

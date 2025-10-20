@@ -15,7 +15,7 @@ project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root / 'src'))
 
 from src.core.case_manager import CaseManager
-from src.intelligence.vector_store import EnhancedVectorStore
+from src.intelligence.vector_store import VectorStore
 from src.intelligence.query_engine import QueryEngine, SimpleKnowledgeGraph
 
 
@@ -181,7 +181,7 @@ class HybridLitigationChat:
         
         # Load vector store
         print("   • Loading vector store...")
-        self.vector_store = EnhancedVectorStore(case_dir=case_dir)
+        self.vector_store = VectorStore(case_dir=case_dir)
         
         # Load knowledge graph
         print("   • Initialising knowledge graph...")

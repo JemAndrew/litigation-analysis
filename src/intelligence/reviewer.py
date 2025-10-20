@@ -189,9 +189,12 @@ class Folder69Reviewer:
         """
         return self.vector_store.validate_documents(self.folder_69_path)
     
-    def estimate_costs(self) -> Dict:
+    def estimate_costs(self, sample_size: Optional[int] = None) -> Dict:
         """
         Estimate complete analysis costs
+        
+        Args:
+            sample_size: If provided, estimate only for N documents
         
         Returns:
             Cost breakdown dictionary
@@ -199,7 +202,14 @@ class Folder69Reviewer:
         # Count documents
         pdf_files = list(self.folder_69_path.rglob('*.pdf'))
         docx_files = list(self.folder_69_path.rglob('*.docx'))
-        doc_count = len(pdf_files) + len(docx_files)
+        total_doc_count = len(pdf_files) + len(docx_files)
+        
+        # Use sample size if provided
+        doc_count = sample_size if sample_size else total_doc_count
+        
+        # Show warning if sampling
+        if sample_size:
+            print(f"\n🧪 SAMPLE MODE: Estimating for {sample_size} documents (out of {total_doc_count} total)")
         
         # Ingestion cost
         ingestion_estimate = self.vector_store.estimate_ingestion_cost(doc_count)
@@ -215,6 +225,8 @@ class Folder69Reviewer:
         
         return {
             'documents': doc_count,
+            'total_documents_available': total_doc_count,
+            'is_sample': sample_size is not None,
             'ingestion': {
                 'cost_gbp': ingestion_estimate['estimated_cost_gbp'],
                 'time_minutes': ingestion_estimate['estimated_time_minutes'],
@@ -481,7 +493,7 @@ class Folder69Reviewer:
                 doc_id = filename.rsplit('.', 1)[0]
                 doc_ids_found.add(doc_id)
         
-        doc_ids_list = sorted(list(doc_ids_found))[:total_docs]
+        doc_ids_list = sorted(list(doc_ids_found))[:total_docs] 
         
         print(f"✅ Found {len(doc_ids_list)} unique documents to analyse\n")
         
@@ -751,7 +763,12 @@ British English. Be concise but specific. 2-3 pages max."""
             sample_size: If provided, only analyse N documents (for testing)
         """
         print("\n" + "="*70)
-        print("FOLDER 69 COMPLETE REVIEW")
+        
+        if sample_size:
+            print(f"🧪 SAMPLE REVIEW - {sample_size} DOCUMENTS")
+        else:
+            print("FOLDER 69 COMPLETE REVIEW")
+        
         print("="*70)
         print("\nThis system provides:")
         print("  ✓ Document validation")
@@ -761,14 +778,20 @@ British English. Be concise but specific. 2-3 pages max."""
         print("  ✓ Litigation recommendations")
         print("  ✓ Complete Excel export\n")
         
-        # Step 0: Cost estimation
+        # Step 0: Cost estimation - FIX: Pass sample_size parameter
         print("━"*70)
         print("STEP 0: COST ESTIMATION")
         print("━"*70 + "\n")
         
-        estimate = self.estimate_costs()
+        estimate = self.estimate_costs(sample_size=sample_size)  # ← FIX HERE
+        
         print(f"📊 Complete Analysis Estimate:")
-        print(f"   Documents: {estimate['documents']:,}")
+        
+        if estimate['is_sample']:
+            print(f"   🧪 SAMPLE MODE: {estimate['documents']} documents (out of {estimate['total_documents_available']} total)")
+        else:
+            print(f"   Documents: {estimate['documents']:,}")
+        
         print(f"   Total cost: £{estimate['total']['cost_gbp']:.2f}")
         print(f"   Total time: {estimate['total']['time_hours']:.1f} hours")
         print(f"\n   Breakdown:")
