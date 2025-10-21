@@ -98,7 +98,7 @@ class ClaudeClient:
                     'max_tokens': max_tokens,
                     'temperature': temperature,
                     'messages': messages,
-                    'timeout': 1200.0  # 20 minute timeout
+                    'timeout': 3600.0  # 20 minute timeout
                 }
                 
                 if system:

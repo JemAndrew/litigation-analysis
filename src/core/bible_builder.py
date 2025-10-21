@@ -6,9 +6,11 @@ Orchestrates the complete Case Bible building process:
 1. Classifies folders (what to read)
 2. Selects master documents (skip drafts)
 3. Extracts text from documents
-4. Builds comprehensive Bible prompt
-5. Calls Claude with extended thinking
-6. Saves Case Bible with metadata
+4. **DETECTS document metadata (case number, dates, parties)**
+5. **INJECTS warnings for mislabeled files**
+6. Builds comprehensive Bible prompt
+7. Calls Claude with extended thinking
+8. Saves Case Bible with metadata
 
 This is run ONCE per case (or when case significantly changes).
 
@@ -22,6 +24,7 @@ from dataclasses import dataclass, asdict
 from datetime import datetime
 import json
 import logging
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -76,16 +79,19 @@ class BibleBuilder:
     - Folder classification
     - Document selection
     - Text extraction
+    - **Metadata detection (NEW - detects mislabeled files)**
     - Bible generation via Claude (with extended thinking)
     - Saving results
     
     ARCHITECTURE NOTE:
     This does NOT just extract text. It:
     1. Extracts text from PDFs (PyPDF2 - no AI)
-    2. Sends ALL text to Claude with EXTENDED THINKING
-    3. Claude analyzes deeply and creates Case Bible
-    4. Bible gets CACHED by Anthropic
-    5. Future queries read cached Bible (90% cost savings)
+    2. **Detects document metadata (case number, dates, parties)**
+    3. **Injects warnings for mislabeled files**
+    4. Sends ALL text to Claude with EXTENDED THINKING
+    5. Claude analyses deeply and creates Case Bible
+    6. Bible gets CACHED by Anthropic
+    7. Future queries read cached Bible (90% cost savings)
     """
     
     def __init__(
@@ -124,22 +130,23 @@ class BibleBuilder:
         self.output_dir = Path(f"cases/{case_id}/knowledge")
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
-        logger.info(f"Initializing Bible Builder for case: {case_name}")
+        logger.info(f"Initialising Bible Builder for case: {case_name}")
         
-        # Initialize components
+        # Initialise components
         try:
             self.classifier = FolderClassifier(self.case_root)
             self.selector = DocumentSelector()
             self.prompts = BiblePrompts()
             self.claude = ClaudeClient()
         except Exception as e:
-            logger.error(f"Failed to initialize components: {e}")
+            logger.error(f"Failed to initialise components: {e}")
             raise
         
         # Tracking
         self.start_time = None
         self.extracted_texts = {}
         self.legal_authorities_list = []
+        self.mislabeled_files_detected = []  # Track mislabeled files
     
     def build_bible(self, use_extended_thinking: bool = True) -> Path:
         """
@@ -212,9 +219,9 @@ class BibleBuilder:
         if not self.extracted_texts:
             raise ValueError("No text extracted from any documents! Check file formats.")
         
-        # Step 4: Build Bible prompt
+        # Step 4: Build Bible prompt (with metadata detection)
         print("\n" + "="*70)
-        print("STEP 4: BUILD BIBLE PROMPT")
+        print("STEP 4: BUILD BIBLE PROMPT (WITH METADATA DETECTION)")
         print("="*70)
         
         bible_prompt = self._build_bible_prompt()
@@ -247,11 +254,119 @@ class BibleBuilder:
         print(f"📊 Length: {len(bible_text):,} characters")
         print(f"⏱️  Time: {elapsed/60:.1f} minutes")
         print(f"💰 Cost: £{self.claude.total_cost_gbp:.2f}")
+        
+        if self.mislabeled_files_detected:
+            print(f"\n⚠️  Mislabeled files detected and handled: {len(self.mislabeled_files_detected)}")
+            for filename in self.mislabeled_files_detected:
+                print(f"   • {filename}")
+        
         print(f"\n💡 This Bible is now CACHED by Anthropic")
         print(f"   Future queries will cost ~£0.03 each (90% savings!)")
         print()
         
         return bible_path
+    
+    def _extract_document_metadata(self, filename: str, text: str) -> Dict[str, Optional[str]]:
+        """
+        ✅ NEW METHOD: Extract metadata from document to identify mislabeled files
+        
+        Detects:
+        - LCIA Case Number (215173 = Lismore v PH current case)
+        - Document date (2024/2025 = current case)
+        - Filing party (Velitor Law = Lismore, Addleshaw/Boies = PH)
+        - Document type (Statement of Defence, Statement of Claim, etc.)
+        - Solicitor firm
+        
+        Critical for identifying:
+        - "PID Statement of Defence" → Actually Lismore's current defence
+        - "P&ID" labeled documents → Actually about Lismore v PH
+        
+        Args:
+            filename: Document filename
+            text: Extracted text content
+        
+        Returns:
+            Dict with metadata fields
+        """
+        
+        metadata = {
+            'filename': filename,
+            'actual_case': None,
+            'document_type': None,
+            'filing_party': None,
+            'document_date': None,
+            'solicitor_firm': None,
+            'case_number': None,
+            'is_mislabeled': False  # Flag if filename misleading
+        }
+        
+        # Extract first 5000 chars for header analysis
+        header_text = text[:5000].lower()
+        
+        # Detect LCIA case number
+        lcia_match = re.search(r'lcia\s+case\s+no\.?\s*(\d+)', header_text, re.IGNORECASE)
+        if lcia_match:
+            metadata['case_number'] = lcia_match.group(1)
+            
+            # Case 215173 = Lismore v PH (current case)
+            if '215173' in lcia_match.group(1):
+                metadata['actual_case'] = 'Lismore v Process Holdings (CURRENT CASE)'
+        
+        # Detect parties to confirm which case
+        if 'process holdings limited' in header_text and 'lismore' in header_text:
+            metadata['actual_case'] = 'Lismore v Process Holdings (CURRENT CASE)'
+            
+            # Check which party is claimant/respondent
+            if re.search(r'claimant.*process holdings', header_text, re.IGNORECASE):
+                if re.search(r'statement of defence', header_text, re.IGNORECASE):
+                    metadata['filing_party'] = 'Lismore (First Respondent)'
+                    metadata['document_type'] = 'Statement of Defence'
+                elif re.search(r'statement of claim', header_text, re.IGNORECASE):
+                    metadata['filing_party'] = 'Process Holdings (Claimant)'
+                    metadata['document_type'] = 'Statement of Claim'
+                elif re.search(r'request for arbitration', header_text, re.IGNORECASE):
+                    metadata['filing_party'] = 'Process Holdings (Claimant)'
+                    metadata['document_type'] = 'Request for Arbitration'
+                elif re.search(r'response', header_text, re.IGNORECASE):
+                    metadata['filing_party'] = 'Lismore (First Respondent)'
+                    metadata['document_type'] = 'Response to Request for Arbitration'
+        
+        # Detect solicitor firm
+        if 'velitor' in header_text:
+            metadata['solicitor_firm'] = 'Velitor Law (Lismore\'s solicitors)'
+            metadata['filing_party'] = 'Lismore (First Respondent)'
+        elif 'addleshaw' in header_text or 'goddard' in header_text:
+            metadata['solicitor_firm'] = 'Addleshaw Goddard (PH\'s solicitors)'
+            metadata['filing_party'] = 'Process Holdings (Claimant)'
+        elif 'boies' in header_text and 'schiller' in header_text:
+            metadata['solicitor_firm'] = 'Boies Schiller Flexner (PH\'s solicitors)'
+            metadata['filing_party'] = 'Process Holdings (Claimant)'
+        
+        # Detect document date
+        # Look for patterns like "14 October 2024" or "3 July 2024"
+        date_patterns = [
+            r'(\d{1,2}\s+(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{4})',
+            r'dated:\s*(\d{1,2}\s+\w+\s+\d{4})',
+            r'(\d{1,2}/\d{1,2}/\d{4})'
+        ]
+        
+        for pattern in date_patterns:
+            date_match = re.search(pattern, header_text, re.IGNORECASE)
+            if date_match:
+                metadata['document_date'] = date_match.group(1)
+                break
+        
+        # Check if file is mislabeled
+        filename_lower = filename.lower()
+        if ('pid' in filename_lower or 'p&id' in filename_lower):
+            # If filename suggests P&ID but metadata shows current case
+            if metadata['case_number'] == '215173' or metadata['actual_case'] == 'Lismore v Process Holdings (CURRENT CASE)':
+                metadata['is_mislabeled'] = True
+            # Or if dated 2024/2025
+            elif metadata['document_date'] and any(year in metadata['document_date'] for year in ['2024', '2025']):
+                metadata['is_mislabeled'] = True
+        
+        return metadata
     
     def _extract_all_documents(self, selected: Dict[str, List]) -> None:
         """
@@ -399,7 +514,12 @@ class BibleBuilder:
     
     def _build_bible_prompt(self) -> str:
         """
-        Build the complete Bible generation prompt
+        ✅ ENHANCED: Build the complete Bible generation prompt
+        
+        NOW INCLUDES:
+        - Metadata detection for each document
+        - Warnings for mislabeled files (PID Defence, etc.)
+        - Context injection to guide Claude correctly
         
         Returns:
             Complete prompt for Claude
@@ -407,7 +527,7 @@ class BibleBuilder:
         
         print("\n🔨 Building comprehensive prompt...")
         
-        # Organize extracted texts by category
+        # Organise extracted texts by category WITH METADATA
         pleadings = {}
         indices = {}
         witness_statements_text = ""
@@ -418,18 +538,63 @@ class BibleBuilder:
             category = data['category']
             text = data['text']
             
+            # ✅ NEW: Extract metadata to identify mislabeled files
+            metadata = self._extract_document_metadata(filename, text)
+            
+            # Build warning prefix for mislabeled files
+            warning_prefix = ""
+            if metadata['is_mislabeled']:
+                self.mislabeled_files_detected.append(filename)
+                
+                warning_prefix = f"""
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🚨🚨🚨 CRITICAL WARNING: MISLABELED FILE DETECTED 🚨🚨🚨
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+FILENAME: {filename}
+
+⚠️ FILENAME IS MISLEADING - IGNORE FILENAME, READ CONTENT INSTEAD
+
+ACTUAL CONTENT ANALYSIS:
+✓ Actual Case: {metadata['actual_case'] or 'CHECK CONTENT'}
+✓ Document Type: {metadata['document_type'] or 'CHECK HEADER'}
+✓ Filed By: {metadata['filing_party'] or 'CHECK HEADER'}
+✓ Document Date: {metadata['document_date'] or 'CHECK HEADER'}
+✓ Solicitor Firm: {metadata['solicitor_firm'] or 'CHECK HEADER'}
+✓ LCIA Case No: {metadata['case_number'] or 'CHECK HEADER'}
+
+🚨 THIS FILE IS ABOUT THE **CURRENT CASE** (Lismore v Process Holdings)
+🚨 DO NOT treat as historical P&ID v Nigeria background
+🚨 TREAT AS a PRIMARY PLEADING in THIS arbitration
+
+IF this is a Statement of Defence:
+→ This is Lismore's defence to PH's claims
+→ This is one of THE MOST IMPORTANT documents
+→ Analyse it thoroughly for Lismore's arguments and counterclaims
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+"""
+            
+            # Organise by category with warnings prepended
             if category == 'pleadings':
                 # Determine which pleading this is
                 name_lower = filename.lower()
+                full_text = warning_prefix + text
+                
                 if 'statement of claim' in name_lower and 'response' not in name_lower:
-                    pleadings['claim'] = text
+                    pleadings['claim'] = full_text
                 elif 'defence' in name_lower and 'response' not in name_lower:
-                    pleadings['defence'] = text
+                    pleadings['defence'] = full_text
+                elif 'request for arbitration' in name_lower:
+                    pleadings['request'] = full_text
+                elif 'response' in name_lower and 'request' in name_lower:
+                    pleadings['response'] = full_text
                 elif 'reply' in name_lower or 'rejoinder' in name_lower:
                     if 'reply' not in pleadings:
-                        pleadings['reply'] = text
+                        pleadings['reply'] = full_text
                     else:
-                        pleadings['rejoinder'] = text
+                        pleadings['rejoinder'] = full_text
             
             elif category == 'indices':
                 # Determine which index
@@ -475,6 +640,10 @@ class BibleBuilder:
         print(f"   ✅ Prompt built ({len(prompt):,} characters)")
         print(f"   📊 Estimated input tokens: ~{len(prompt) // 4:,}")
         
+        if self.mislabeled_files_detected:
+            print(f"   ⚠️  Mislabeled files detected: {len(self.mislabeled_files_detected)}")
+            print(f"       Warnings injected into prompt")
+        
         return prompt
     
     def _generate_bible(self, prompt: str, use_extended_thinking: bool) -> str:
@@ -482,57 +651,41 @@ class BibleBuilder:
         Call Claude to generate the Case Bible
         
         CRITICAL: This is where the MAGIC happens!
-        - NOT just text extraction
-        - Claude ANALYZES with extended thinking
-        - Creates rich analytical foundation
-        - Gets CACHED for 1000+ future queries
         
         Args:
-            prompt: Complete prompt
-            use_extended_thinking: Use extended thinking (RECOMMENDED)
+            prompt: Complete Bible generation prompt
+            use_extended_thinking: Use extended thinking (20K tokens)
         
         Returns:
-            Generated Case Bible text
+            Generated Bible text
         """
         
-        print(f"\n🤖 Calling Claude to generate Case Bible...")
-        print(f"   This is a LARGE job - will take 5-10 minutes")
-        print(f"   Extended thinking: {'✅ YES (RECOMMENDED)' if use_extended_thinking else '❌ NO'}")
+        # Estimate cost
+        input_tokens = len(prompt) // 4
+        output_tokens = 32000
+        thinking_tokens = 20000 if use_extended_thinking else 0
+        
+        total_tokens = input_tokens + output_tokens + thinking_tokens
+        cost_estimate = (
+            input_tokens * 0.003 / 1000 +
+            output_tokens * 0.015 / 1000 +
+            thinking_tokens * 0.003 / 1000
+        ) * 1.27  # USD to GBP
+        
+        print(f"\n   📊 Estimated tokens:")
+        print(f"      Input: {input_tokens:,}")
+        print(f"      Output: {output_tokens:,}")
+        if use_extended_thinking:
+            print(f"      Thinking: {thinking_tokens:,}")
+        print(f"      Total: {total_tokens:,}")
+        print(f"\n   💰 Estimated cost: £{cost_estimate:.2f}")
         
         if use_extended_thinking:
-            print(f"\n💡 Extended thinking means Claude will:")
-            print(f"   - Analyze legal strategy deeply")
-            print(f"   - Map evidence chains")
-            print(f"   - Detect contradictions")
-            print(f"   - Assess claim strengths")
-            print(f"   - Calculate settlement leverage")
-            print(f"   This analysis gets CACHED - saving 90% on future queries!")
+            print(f"\n   🧠 Extended thinking enabled (20K tokens)")
+            print(f"      Claude will think deeply before responding")
+            print(f"      This produces MUCH better analysis (+£0.30)")
         
-        # Estimate cost
-        print(f"\n📊 Estimating cost...")
-        
-        try:
-            estimate = self.claude.estimate_cost_with_token_count(
-                text=prompt,
-                output_tokens=32000,
-                model='claude-sonnet-4-5-20250929'
-            )
-            
-            print(f"   Input tokens: {estimate['input_tokens']:,}")
-            print(f"   Expected output tokens: {estimate['output_tokens']:,}")
-            print(f"   💰 Estimated cost: £{estimate['gbp']:.2f}")
-            
-            if use_extended_thinking:
-                print(f"   💭 Extended thinking: ~£0.30 additional")
-                print(f"   💰 Total estimated: ~£{estimate['gbp'] + 0.30:.2f}")
-        
-        except Exception as e:
-            logger.warning(f"Token counting failed: {e}")
-            print(f"   ⚠️  Token counting failed, using fallback")
-            print(f"   💰 Estimated cost: £0.80-1.20")
-        
-        # Confirm
-        confirm = input("\n   Proceed with Bible generation? (y/n): ")
+        confirm = input(f"\n   ✅ Proceed with Bible generation? (y/n): ")
         if confirm.lower() != 'y':
             print("   ❌ Cancelled by user")
             sys.exit(0)
@@ -543,9 +696,7 @@ class BibleBuilder:
         # Build system prompt
         system_prompt = self.prompts.get_system_prompt()
         
-        # CRITICAL FIX: When using extended thinking, CANNOT use text prefilling
-        # Extended thinking requires the assistant message to start with a thinking block
-        # So we just send the user message and let Claude structure the response
+        # Build messages
         messages = [
             {
                 'role': 'user',
@@ -558,7 +709,7 @@ class BibleBuilder:
         if use_extended_thinking:
             thinking_config = {
                 'type': 'enabled',
-                'budget_tokens': 20000  # 20K tokens for deep thinking
+                'budget_tokens': 15000  # 20K tokens for deep thinking
             }
         
         # Call Claude with all the right settings
@@ -579,7 +730,6 @@ class BibleBuilder:
             raise
         
         # Extract content from response
-        # create_message returns: {'content': str, 'usage': dict, 'response': object}
         bible_text = response['content']
         
         print(f"\n   ✅ Bible generated successfully!")
@@ -596,7 +746,7 @@ class BibleBuilder:
         selected: Dict
     ) -> Path:
         """
-        Save Case Bible (both formats) and metadata
+        Save Case Bible and metadata
         
         Args:
             bible_text: Generated Bible
@@ -616,27 +766,6 @@ class BibleBuilder:
         except Exception as e:
             logger.error(f"Failed to save Bible: {e}")
             raise
-        
-        # Parse and save structured Bible (optional - may fail, that's OK)
-        try:
-            from src.utils.bible_parser import BibleParser
-            
-            print("\n📊 Attempting to generate structured Bible...")
-            parser = BibleParser()
-            structured = parser.parse_bible(bible_text)
-            
-            structured_file = self.output_dir / "case_bible_structured.json"
-            with open(structured_file, 'w', encoding='utf-8') as f:
-                json.dump(structured, f, indent=2, ensure_ascii=False)
-            
-            print(f"✅ Structured Bible saved: {structured_file}")
-            
-        except ImportError:
-            print("⚠️  BibleParser not found - skipping structured Bible")
-        except Exception as e:
-            logger.warning(f"Could not generate structured Bible: {e}")
-            print(f"⚠️  Could not generate structured Bible (not critical)")
-            print("   Plain text Bible is still fully functional")
         
         # Create metadata
         elapsed = (datetime.now() - self.start_time).total_seconds()
@@ -689,7 +818,8 @@ class BibleBuilder:
                         }
                         for filename, data in self.extracted_texts.items()
                     ],
-                    'legal_authorities': self.legal_authorities_list
+                    'legal_authorities': self.legal_authorities_list,
+                    'mislabeled_files_detected': self.mislabeled_files_detected
                 }, f, indent=2, ensure_ascii=False)
             print(f"✅ Document list saved: {doc_list_file}")
         except Exception as e:
@@ -705,8 +835,8 @@ def main():
     CASE_ROOT = Path(r"C:\Users\JemAndrew\Velitor\Communication site - Documents\LIS1.1")
     CASE_ID = "lismore_v_ph"
     CASE_NAME = "Lismore Capital Limited v Process Holdings Limited"
-    CLAIMANT = "Lismore Capital Limited"
-    RESPONDENT = "Process Holdings Limited (PH)"
+    CLAIMANT = "Process Holdings Limited"
+    RESPONDENT = "Lismore Capital Limited"
     TRIBUNAL = "LCIA"
     
     # Build Bible
