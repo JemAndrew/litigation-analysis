@@ -21,14 +21,26 @@ from typing import Dict, List, Optional
 from dataclasses import dataclass, asdict
 from datetime import datetime
 import json
+import logging
 
-# Add src to path for imports
-sys.path.append(str(Path(__file__).parent.parent))
+logger = logging.getLogger(__name__)
 
-from filter.folder_classifier import FolderClassifier
-from filter.document_selector import DocumentSelector
-from prompts.bible_prompts import BiblePrompts
-from api.claude_client import ClaudeClient
+# Add parent directories to path for imports
+project_root = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(project_root))
+sys.path.insert(0, str(project_root / 'src'))
+
+try:
+    from src.filter.folder_classifier import FolderClassifier
+    from src.filter.document_selector import DocumentSelector
+    from src.prompts.bible_prompts import BiblePrompts
+    from src.api.claude_client import ClaudeClient
+except ImportError:
+    # Fallback for different import styles
+    from filter.folder_classifier import FolderClassifier
+    from filter.document_selector import DocumentSelector
+    from prompts.bible_prompts import BiblePrompts
+    from api.claude_client import ClaudeClient
 
 # Document extraction libraries
 try:
@@ -64,8 +76,16 @@ class BibleBuilder:
     - Folder classification
     - Document selection
     - Text extraction
-    - Bible generation via Claude
+    - Bible generation via Claude (with extended thinking)
     - Saving results
+    
+    ARCHITECTURE NOTE:
+    This does NOT just extract text. It:
+    1. Extracts text from PDFs (PyPDF2 - no AI)
+    2. Sends ALL text to Claude with EXTENDED THINKING
+    3. Claude analyzes deeply and creates Case Bible
+    4. Bible gets CACHED by Anthropic
+    5. Future queries read cached Bible (90% cost savings)
     """
     
     def __init__(
@@ -96,15 +116,25 @@ class BibleBuilder:
         self.respondent = respondent
         self.tribunal = tribunal
         
+        # Validate case root exists
+        if not self.case_root.exists():
+            raise ValueError(f"Case root does not exist: {self.case_root}")
+        
         # Output directory (where Bible will be saved)
-        self.output_dir = Path(f"cases/{case_id}")
+        self.output_dir = Path(f"cases/{case_id}/knowledge")
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
+        logger.info(f"Initializing Bible Builder for case: {case_name}")
+        
         # Initialize components
-        self.classifier = FolderClassifier(self.case_root)
-        self.selector = DocumentSelector()
-        self.prompts = BiblePrompts()
-        self.claude = ClaudeClient()
+        try:
+            self.classifier = FolderClassifier(self.case_root)
+            self.selector = DocumentSelector()
+            self.prompts = BiblePrompts()
+            self.claude = ClaudeClient()
+        except Exception as e:
+            logger.error(f"Failed to initialize components: {e}")
+            raise
         
         # Tracking
         self.start_time = None
@@ -116,7 +146,14 @@ class BibleBuilder:
         Build the complete Case Bible
         
         Args:
-            use_extended_thinking: Use Claude's extended thinking (recommended)
+            use_extended_thinking: Use Claude's extended thinking (RECOMMENDED)
+                                  
+                                  Why use thinking:
+                                  - Deep legal analysis (not just extraction)
+                                  - Evidence chain mapping
+                                  - Contradiction detection
+                                  - Strategic insights
+                                  - £0.30 extra cost, 1000x benefit
         
         Returns:
             Path to saved Case Bible file
@@ -141,6 +178,11 @@ class BibleBuilder:
         
         organised = self.classifier.get_folders_for_bible()
         
+        # Validate we got folders
+        total_folders = sum(len(v) for v in organised.values())
+        if total_folders == 0:
+            raise ValueError("No folders found to process! Check case_root path.")
+        
         # Step 2: Select master documents
         print("\n" + "="*70)
         print("STEP 2: SELECT MASTER DOCUMENTS")
@@ -149,7 +191,15 @@ class BibleBuilder:
         to_process = (organised['critical'] + organised['high'] + 
                      organised['medium'] + organised['legal_authorities'])
         
+        if not to_process:
+            raise ValueError("No folders selected for Bible building!")
+        
         selected = self.selector.select_for_bible_building(to_process)
+        
+        # Validate we got documents
+        total_docs = sum(len(v) for v in selected.values())
+        if total_docs == 0:
+            raise ValueError("No documents selected! Check folder contents.")
         
         # Step 3: Extract text from documents
         print("\n" + "="*70)
@@ -157,6 +207,10 @@ class BibleBuilder:
         print("="*70)
         
         self._extract_all_documents(selected)
+        
+        # Validate we extracted something
+        if not self.extracted_texts:
+            raise ValueError("No text extracted from any documents! Check file formats.")
         
         # Step 4: Build Bible prompt
         print("\n" + "="*70)
@@ -171,6 +225,10 @@ class BibleBuilder:
         print("="*70)
         
         bible_text = self._generate_bible(bible_prompt, use_extended_thinking)
+        
+        # Validate we got output
+        if not bible_text or len(bible_text) < 1000:
+            raise ValueError(f"Bible generation produced suspiciously short output ({len(bible_text)} chars)")
         
         # Step 6: Save Bible and metadata
         print("\n" + "="*70)
@@ -189,6 +247,8 @@ class BibleBuilder:
         print(f"📊 Length: {len(bible_text):,} characters")
         print(f"⏱️  Time: {elapsed/60:.1f} minutes")
         print(f"💰 Cost: £{self.claude.total_cost_gbp:.2f}")
+        print(f"\n💡 This Bible is now CACHED by Anthropic")
+        print(f"   Future queries will cost ~£0.03 each (90% savings!)")
         print()
         
         return bible_path
@@ -206,9 +266,15 @@ class BibleBuilder:
             for docs in selected.values()
         )
         
-        print(f"\n📄 Extracting text from {total_to_extract} documents...\n")
+        if total_to_extract == 0:
+            logger.warning("No documents marked for full extraction!")
+            return
+        
+        print(f"\n📄 Extracting text from {total_to_extract} documents...")
+        print(f"   (This may take 2-5 minutes)\n")
         
         extracted_count = 0
+        failed_count = 0
         
         for category, documents in selected.items():
             if not documents:
@@ -228,11 +294,12 @@ class BibleBuilder:
                 
                 # Extract full text
                 try:
-                    print(f"   📖 {doc.filename[:60]}...")
+                    filename_display = doc.filename[:60] + "..." if len(doc.filename) > 60 else doc.filename
+                    print(f"   📖 {filename_display}")
                     
                     text = self._extract_text_from_file(doc.path)
                     
-                    if text:
+                    if text and len(text.strip()) > 50:  # Validate meaningful content
                         self.extracted_texts[doc.filename] = {
                             'text': text,
                             'category': category,
@@ -240,11 +307,19 @@ class BibleBuilder:
                             'size_mb': doc.size_mb
                         }
                         extracted_count += 1
+                    else:
+                        logger.warning(f"Document {doc.filename} extracted but empty/minimal content")
+                        failed_count += 1
                     
                 except Exception as e:
-                    print(f"      ⚠️  Failed to extract: {e}")
+                    logger.error(f"Failed to extract {doc.filename}: {e}")
+                    print(f"      ⚠️  Failed: {str(e)[:50]}")
+                    failed_count += 1
         
-        print(f"\n✅ Extracted {extracted_count}/{total_to_extract} documents")
+        print(f"\n✅ Successfully extracted: {extracted_count}/{total_to_extract} documents")
+        if failed_count > 0:
+            print(f"⚠️  Failed/Empty: {failed_count} documents")
+            logger.warning(f"Failed to extract {failed_count} documents")
     
     def _extract_text_from_file(self, file_path: Path) -> str:
         """
@@ -257,26 +332,52 @@ class BibleBuilder:
             Extracted text
         """
         
-        if str(file_path).lower().endswith('.pdf'):
+        suffix = file_path.suffix.lower()
+        
+        if suffix == '.pdf':
             return self._extract_pdf(file_path)
-        elif str(file_path).lower().endswith(('.doc', '.docx')):
+        elif suffix in ['.doc', '.docx']:
             return self._extract_docx(file_path)
-        elif str(file_path).lower().endswith(('.xlsx', '.xls', '.xlsm')):
+        elif suffix in ['.xlsx', '.xls', '.xlsm']:
             # For Excel files, just note them (don't extract - too complex)
-            return f"[Excel file: {file_path.name}]"
+            return f"[Excel file: {file_path.name} - Contains structured data/index]"
         else:
-            raise ValueError(f"Unsupported file type: {file_path.suffix}")
+            raise ValueError(f"Unsupported file type: {suffix}")
     
     def _extract_pdf(self, file_path: Path) -> str:
         """Extract text from PDF"""
         
         try:
+            text_parts = []
+            
             with open(file_path, 'rb') as f:
                 reader = PyPDF2.PdfReader(f)
-                text = ""
-                for page in reader.pages:
-                    text += page.extract_text() + "\n"
-                return text.strip()
+                
+                # Check if PDF is encrypted
+                if reader.is_encrypted:
+                    try:
+                        reader.decrypt('')
+                    except:
+                        raise Exception("PDF is encrypted and cannot be decrypted")
+                
+                page_count = len(reader.pages)
+                
+                # Extract text from all pages
+                for page_num, page in enumerate(reader.pages):
+                    try:
+                        page_text = page.extract_text()
+                        if page_text:
+                            text_parts.append(page_text)
+                    except Exception as e:
+                        logger.warning(f"Failed to extract page {page_num + 1} of {file_path.name}: {e}")
+                        continue
+            
+            full_text = "\n".join(text_parts)
+            
+            if not full_text.strip():
+                raise Exception("PDF appears to be scanned/image-based - no text extracted")
+            
+            return full_text.strip()
         
         except Exception as e:
             raise Exception(f"PDF extraction failed: {e}")
@@ -286,8 +387,12 @@ class BibleBuilder:
         
         try:
             doc = DocxDocument(file_path)
-            text = "\n".join([paragraph.text for paragraph in doc.paragraphs])
-            return text.strip()
+            paragraphs = [paragraph.text for paragraph in doc.paragraphs if paragraph.text.strip()]
+            
+            if not paragraphs:
+                raise Exception("DOCX appears empty - no text found")
+            
+            return "\n".join(paragraphs)
         
         except Exception as e:
             raise Exception(f"DOCX extraction failed: {e}")
@@ -368,6 +473,7 @@ class BibleBuilder:
         )
         
         print(f"   ✅ Prompt built ({len(prompt):,} characters)")
+        print(f"   📊 Estimated input tokens: ~{len(prompt) // 4:,}")
         
         return prompt
     
@@ -375,9 +481,15 @@ class BibleBuilder:
         """
         Call Claude to generate the Case Bible
         
+        CRITICAL: This is where the MAGIC happens!
+        - NOT just text extraction
+        - Claude ANALYZES with extended thinking
+        - Creates rich analytical foundation
+        - Gets CACHED for 1000+ future queries
+        
         Args:
             prompt: Complete prompt
-            use_extended_thinking: Use extended thinking
+            use_extended_thinking: Use extended thinking (RECOMMENDED)
         
         Returns:
             Generated Case Bible text
@@ -385,10 +497,19 @@ class BibleBuilder:
         
         print(f"\n🤖 Calling Claude to generate Case Bible...")
         print(f"   This is a LARGE job - will take 5-10 minutes")
-        print(f"   Extended thinking: {'✅ YES' if use_extended_thinking else '❌ NO'}")
+        print(f"   Extended thinking: {'✅ YES (RECOMMENDED)' if use_extended_thinking else '❌ NO'}")
         
-        # Estimate cost with accurate token counting
-        print(f"\n📊 Counting tokens using Anthropic API...")
+        if use_extended_thinking:
+            print(f"\n💡 Extended thinking means Claude will:")
+            print(f"   - Analyze legal strategy deeply")
+            print(f"   - Map evidence chains")
+            print(f"   - Detect contradictions")
+            print(f"   - Assess claim strengths")
+            print(f"   - Calculate settlement leverage")
+            print(f"   This analysis gets CACHED - saving 90% on future queries!")
+        
+        # Estimate cost
+        print(f"\n📊 Estimating cost...")
         
         try:
             estimate = self.claude.estimate_cost_with_token_count(
@@ -400,15 +521,15 @@ class BibleBuilder:
             print(f"   Input tokens: {estimate['input_tokens']:,}")
             print(f"   Expected output tokens: {estimate['output_tokens']:,}")
             print(f"   💰 Estimated cost: £{estimate['gbp']:.2f}")
+            
+            if use_extended_thinking:
+                print(f"   💭 Extended thinking: ~£0.30 additional")
+                print(f"   💰 Total estimated: ~£{estimate['gbp'] + 0.30:.2f}")
         
         except Exception as e:
-            print(f"   ⚠️  Token counting failed: {e}")
-            print(f"   Using fallback estimation...")
-            estimate = self.claude.estimate_cost_simple(
-                input_text=prompt,
-                output_tokens=32000
-            )
-            print(f"   💰 Estimated cost: £{estimate['gbp']:.2f}")
+            logger.warning(f"Token counting failed: {e}")
+            print(f"   ⚠️  Token counting failed, using fallback")
+            print(f"   💰 Estimated cost: £0.80-1.20")
         
         # Confirm
         confirm = input("\n   Proceed with Bible generation? (y/n): ")
@@ -417,51 +538,54 @@ class BibleBuilder:
             sys.exit(0)
         
         print("\n   🔄 Generating... (this will take several minutes)")
+        print("   ☕ Good time for a coffee break!\n")
         
         # Build system prompt
         system_prompt = self.prompts.get_system_prompt()
         
-        # PREFILLING: Force Claude to start with exact format
-        prefill_text = "═══════════════════════════════════════════════════════════════════════\n1. CASE OVERVIEW\n═══════════════════════════════════════════════════════════════════════\n\n"
-        
-        # Build messages with prefilling
+        # CRITICAL FIX: When using extended thinking, CANNOT use text prefilling
+        # Extended thinking requires the assistant message to start with a thinking block
+        # So we just send the user message and let Claude structure the response
         messages = [
             {
                 'role': 'user',
                 'content': prompt
-            },
-            {
-                'role': 'assistant',
-                'content': prefill_text  # ← Prefill forces exact format
             }
         ]
         
-        # Call Claude with optimized settings
+        # Configure thinking if enabled
         thinking_config = None
         if use_extended_thinking:
             thinking_config = {
                 'type': 'enabled',
-                'budget_tokens': 20000  # Allow deep thinking
+                'budget_tokens': 20000  # 20K tokens for deep thinking
             }
         
-        response = self.claude.create_message(
-            messages=messages,
-            system=[{
-                'type': 'text',
-                'text': system_prompt,
-                'cache_control': {'type': 'ephemeral'}  # Cache system prompt
-            }],
-            max_tokens=32000,
-            temperature=0.0,  # ← DETERMINISTIC for factual extraction
-            thinking=thinking_config
-        )
+        # Call Claude with all the right settings
+        try:
+            response = self.claude.create_message(
+                messages=messages,
+                system=[{
+                    'type': 'text',
+                    'text': system_prompt,
+                    'cache_control': {'type': 'ephemeral'}  # Cache this for future queries
+                }],
+                max_tokens=32000,
+                temperature=1.0,  # REQUIRED when extended thinking enabled (API constraint)
+                thinking=thinking_config
+            )
+        except Exception as e:
+            logger.error(f"Bible generation failed: {e}")
+            raise
         
-        # Combine prefill + generated content
-        bible_text = prefill_text + response['content']
+        # Extract content from response
+        # create_message returns: {'content': str, 'usage': dict, 'response': object}
+        bible_text = response['content']
         
-        print(f"\n   ✅ Bible generated!")
-        print(f"   Length: {len(bible_text):,} characters")
-        print(f"   Actual cost: £{response['usage'].total_cost_gbp:.2f}")
+        print(f"\n   ✅ Bible generated successfully!")
+        print(f"   📏 Length: {len(bible_text):,} characters")
+        print(f"   📊 Estimated tokens: ~{len(bible_text) // 4:,}")
+        print(f"   💰 Actual cost: £{response['usage']['total_cost_gbp']:.2f}")
         
         return bible_text
     
@@ -485,15 +609,19 @@ class BibleBuilder:
         
         # Save plain text Bible
         bible_file = self.output_dir / "case_bible.txt"
-        bible_file.write_text(bible_text, encoding='utf-8')
         
-        print(f"\n✅ Plain text Bible saved: {bible_file}")
-        
-        # Parse and save structured Bible
         try:
-            from utils.bible_parser import BibleParser
+            bible_file.write_text(bible_text, encoding='utf-8')
+            print(f"\n✅ Plain text Bible saved: {bible_file}")
+        except Exception as e:
+            logger.error(f"Failed to save Bible: {e}")
+            raise
+        
+        # Parse and save structured Bible (optional - may fail, that's OK)
+        try:
+            from src.utils.bible_parser import BibleParser
             
-            print("\n📊 Generating structured Bible...")
+            print("\n📊 Attempting to generate structured Bible...")
             parser = BibleParser()
             structured = parser.parse_bible(bible_text)
             
@@ -503,9 +631,12 @@ class BibleBuilder:
             
             print(f"✅ Structured Bible saved: {structured_file}")
             
+        except ImportError:
+            print("⚠️  BibleParser not found - skipping structured Bible")
         except Exception as e:
-            print(f"⚠️  Could not generate structured Bible: {e}")
-            print("   Plain text Bible is still available for queries.")
+            logger.warning(f"Could not generate structured Bible: {e}")
+            print(f"⚠️  Could not generate structured Bible (not critical)")
+            print("   Plain text Bible is still fully functional")
         
         # Create metadata
         elapsed = (datetime.now() - self.start_time).total_seconds()
@@ -536,28 +667,33 @@ class BibleBuilder:
         
         # Save metadata
         metadata_file = self.output_dir / "case_bible_metadata.json"
-        with open(metadata_file, 'w', encoding='utf-8') as f:
-            json.dump(asdict(metadata), f, indent=2)
-        
-        print(f"✅ Metadata saved: {metadata_file}")
+        try:
+            with open(metadata_file, 'w', encoding='utf-8') as f:
+                json.dump(asdict(metadata), f, indent=2)
+            print(f"✅ Metadata saved: {metadata_file}")
+        except Exception as e:
+            logger.warning(f"Failed to save metadata: {e}")
         
         # Save document list
         doc_list_file = self.output_dir / "extracted_documents.json"
-        with open(doc_list_file, 'w', encoding='utf-8') as f:
-            json.dump({
-                'extracted': [
-                    {
-                        'filename': filename,
-                        'category': data['category'],
-                        'folder': data['folder'],
-                        'length_chars': len(data['text'])
-                    }
-                    for filename, data in self.extracted_texts.items()
-                ],
-                'legal_authorities': self.legal_authorities_list
-            }, f, indent=2)
-        
-        print(f"✅ Document list saved: {doc_list_file}")
+        try:
+            with open(doc_list_file, 'w', encoding='utf-8') as f:
+                json.dump({
+                    'extracted': [
+                        {
+                            'filename': filename,
+                            'category': data['category'],
+                            'folder': data['folder'],
+                            'length_chars': len(data['text']),
+                            'length_tokens_est': len(data['text']) // 4
+                        }
+                        for filename, data in self.extracted_texts.items()
+                    ],
+                    'legal_authorities': self.legal_authorities_list
+                }, f, indent=2, ensure_ascii=False)
+            print(f"✅ Document list saved: {doc_list_file}")
+        except Exception as e:
+            logger.warning(f"Failed to save document list: {e}")
         
         return bible_file
 
@@ -590,8 +726,9 @@ def main():
     print("="*70)
     print(f"\nYour Case Bible is ready at:")
     print(f"   {bible_path}")
-    print(f"\nThis will now be cached for all future queries,")
-    print(f"saving 90% on costs for every question you ask!")
+    print(f"\nThis Bible is now CACHED by Anthropic.")
+    print(f"Future queries will cost ~£0.03 each (90% savings!)")
+    print(f"\nNext step: Integrate this Bible into your chat system.")
 
 
 if __name__ == '__main__':

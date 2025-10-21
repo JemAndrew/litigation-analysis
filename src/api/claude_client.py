@@ -1,60 +1,49 @@
 #!/usr/bin/env python3
 """
-Claude API Client - Anthropic API Wrapper
+Claude API Client - Complete Fixed Version
 
-FIXED VERSION with:
-- Consistent return formats
-- Long timeout (20 minutes) for Bible generation
-- Proper error handling
-- Token counting fallback
+COMBINES:
+- create_message() method (for bible_builder.py)
+- Fixed cost estimation methods (matching dictionary formats)
+- Prompt caching support
+- Extended thinking support
+- Long timeout for Bible generation
 
 British English throughout.
 """
 
 import os
 import time
-from pathlib import Path
 from typing import List, Dict, Optional, Any
-from dataclasses import dataclass
-import anthropic
 from anthropic import Anthropic, APIError, RateLimitError, APITimeoutError
-import dotenv
-dotenv.load_dotenv()
+import logging
 
-
-@dataclass
-class APIUsage:
-    """API usage statistics"""
-    input_tokens: int
-    output_tokens: int
-    cache_creation_input_tokens: int
-    cache_read_input_tokens: int
-    total_cost_usd: float
-    total_cost_gbp: float
+logger = logging.getLogger(__name__)
 
 
 class ClaudeClient:
     """
-    Wrapper for Anthropic Claude API
+    Complete Claude API wrapper
     
     Features:
-    - Prompt caching (90% cost reduction)
+    - create_message() method (for bible_builder)
+    - Prompt caching (90% savings)
     - Extended thinking
-    - Long timeout for Bible generation
     - Cost tracking
+    - Long timeout (20 minutes)
     """
     
-    # Pricing (as of January 2025)
+    # Pricing per 1M tokens (as of October 2025)
     PRICING = {
         'claude-sonnet-4-5-20250929': {
-            'input': 0.000003,      # $3 per 1M tokens
-            'output': 0.000015,     # $15 per 1M tokens
-            'cache_write': 0.00000375,
-            'cache_read': 0.0000003,
+            'input': 3.0,      # $3 per 1M tokens
+            'output': 15.0,    # $15 per 1M tokens
+            'cache_write': 3.75,
+            'cache_read': 0.30
         }
     }
     
-    USD_TO_GBP = 1.27
+    USD_TO_GBP = 0.79
     
     def __init__(self, api_key: Optional[str] = None):
         """Initialise Claude client"""
@@ -62,7 +51,10 @@ class ClaudeClient:
         self.api_key = api_key or os.getenv('ANTHROPIC_API_KEY')
         
         if not self.api_key:
-            raise ValueError("Set ANTHROPIC_API_KEY environment variable")
+            raise ValueError(
+                "ANTHROPIC_API_KEY not found! "
+                "Set it in .env file or environment."
+            )
         
         self.client = Anthropic(api_key=self.api_key)
         
@@ -70,18 +62,34 @@ class ClaudeClient:
         self.total_cost_usd = 0.0
         self.total_cost_gbp = 0.0
         self.call_count = 0
+        
+        logger.info("Claude client initialised")
     
     def create_message(
         self,
         messages: List[Dict[str, str]],
         system: Optional[List[Dict[str, Any]]] = None,
         model: str = 'claude-sonnet-4-5-20250929',
-        max_tokens: int = 16000,
+        max_tokens: int = 32000,
         temperature: float = 1.0,
         thinking: Optional[Dict[str, Any]] = None,
         max_retries: int = 3
     ) -> Dict[str, Any]:
-        """Create a message with Claude"""
+        """
+        Create a message with Claude (for bible_builder.py)
+        
+        Args:
+            messages: List of message dicts with 'role' and 'content'
+            system: Optional system blocks (for caching)
+            model: Model name
+            max_tokens: Maximum output tokens
+            temperature: 0.0-1.0
+            thinking: Extended thinking config
+            max_retries: Number of retry attempts
+        
+        Returns:
+            Dict with 'content' and 'usage' keys
+        """
         
         for attempt in range(max_retries):
             try:
@@ -89,11 +97,13 @@ class ClaudeClient:
                     'model': model,
                     'max_tokens': max_tokens,
                     'temperature': temperature,
-                    'messages': messages
+                    'messages': messages,
+                    'timeout': 1200.0  # 20 minute timeout
                 }
                 
                 if system:
                     request_params['system'] = system
+                
                 if thinking:
                     request_params['thinking'] = thinking
                 
@@ -105,27 +115,27 @@ class ClaudeClient:
                 
                 start_time = time.time()
                 
-                # LONG TIMEOUT FOR BIBLE GENERATION
-                response = self.client.messages.create(
-                    **request_params,
-                    timeout=1200.0  # 20 minutes
-                )
+                response = self.client.messages.create(**request_params)
                 
                 elapsed = time.time() - start_time
                 print(f"   ✅ Response received ({elapsed:.1f}s)")
                 
-                usage = self._calculate_usage(response, model)
+                # Calculate cost
+                usage_info = self._calculate_cost(response, model)
                 
-                self.total_cost_usd += usage.total_cost_usd
-                self.total_cost_gbp += usage.total_cost_gbp
+                self.total_cost_usd += usage_info['total_cost_usd']
+                self.total_cost_gbp += usage_info['total_cost_gbp']
                 self.call_count += 1
                 
                 print(f"\n💰 API COST:")
-                print(f"   Input tokens: {usage.input_tokens:,}")
-                print(f"   Output tokens: {usage.output_tokens:,}")
-                print(f"   This call: £{usage.total_cost_gbp:.4f}")
+                print(f"   Input tokens: {usage_info['input_tokens']:,}")
+                print(f"   Output tokens: {usage_info['output_tokens']:,}")
+                if usage_info.get('cache_read_tokens', 0) > 0:
+                    print(f"   Cache read tokens: {usage_info['cache_read_tokens']:,}")
+                print(f"   This call: £{usage_info['total_cost_gbp']:.4f}")
                 print(f"   Session total: £{self.total_cost_gbp:.2f}")
                 
+                # Extract content
                 content = ""
                 for block in response.content:
                     if block.type == 'text':
@@ -133,50 +143,83 @@ class ClaudeClient:
                 
                 return {
                     'content': content,
-                    'usage': usage,
+                    'usage': usage_info,
                     'response': response
                 }
-                
-            except (RateLimitError, APITimeoutError, APIError) as e:
-                if attempt == max_retries - 1:
+            
+            except RateLimitError as e:
+                if attempt < max_retries - 1:
+                    wait = 2 ** attempt
+                    print(f"   ⚠️ Rate limit hit, waiting {wait}s...")
+                    time.sleep(wait)
+                else:
                     raise
-                time.sleep(2 ** attempt)
-        
-        raise Exception(f"Failed after {max_retries} retries")
+            
+            except APITimeoutError as e:
+                if attempt < max_retries - 1:
+                    print(f"   ⚠️ Timeout, retrying...")
+                else:
+                    raise
+            
+            except Exception as e:
+                logger.error(f"API call failed: {e}")
+                raise
     
-    def _calculate_usage(self, response: Any, model: str) -> APIUsage:
-        """Calculate costs from API response"""
+    def _calculate_cost(self, response, model: str) -> Dict[str, Any]:
+        """
+        Calculate cost from API response
+        
+        Args:
+            response: Anthropic Message object
+            model: Model name
+        
+        Returns:
+            Dict with cost breakdown
+        """
         
         usage = response.usage
         pricing = self.PRICING.get(model, self.PRICING['claude-sonnet-4-5-20250929'])
         
-        input_cost = usage.input_tokens * pricing['input']
-        output_cost = usage.output_tokens * pricing['output']
+        # Input tokens
+        input_tokens = usage.input_tokens
+        input_cost_usd = (input_tokens / 1_000_000) * pricing['input']
         
-        cache_creation_tokens = getattr(usage, 'cache_creation_input_tokens', 0)
+        # Output tokens
+        output_tokens = usage.output_tokens
+        output_cost_usd = (output_tokens / 1_000_000) * pricing['output']
+        
+        # Cache tokens (if any)
         cache_read_tokens = getattr(usage, 'cache_read_input_tokens', 0)
+        cache_cost_usd = (cache_read_tokens / 1_000_000) * pricing['cache_read']
         
-        cache_creation_cost = cache_creation_tokens * pricing['cache_write'] if cache_creation_tokens > 0 else 0
-        cache_read_cost = cache_read_tokens * pricing['cache_read'] if cache_read_tokens > 0 else 0
+        # Cache write tokens (if any)
+        cache_write_tokens = getattr(usage, 'cache_creation_input_tokens', 0)
+        cache_write_cost_usd = (cache_write_tokens / 1_000_000) * pricing['cache_write']
         
-        total_cost_usd = input_cost + output_cost + cache_creation_cost + cache_read_cost
-        total_cost_gbp = total_cost_usd * self.USD_TO_GBP
+        # Total
+        total_usd = input_cost_usd + output_cost_usd + cache_cost_usd + cache_write_cost_usd
+        total_gbp = total_usd * self.USD_TO_GBP
         
-        return APIUsage(
-            input_tokens=usage.input_tokens,
-            output_tokens=usage.output_tokens,
-            cache_creation_input_tokens=cache_creation_tokens,
-            cache_read_input_tokens=cache_read_tokens,
-            total_cost_usd=total_cost_usd,
-            total_cost_gbp=total_cost_gbp
-        )
+        return {
+            'input_tokens': input_tokens,
+            'output_tokens': output_tokens,
+            'cache_read_tokens': cache_read_tokens,
+            'cache_write_tokens': cache_write_tokens,
+            'total_cost_usd': total_usd,
+            'total_cost_gbp': total_gbp
+        }
     
     def count_tokens(self, text: str) -> int:
         """
-        Count tokens using character-based estimation
+        Estimate token count (character-based approximation)
         
-        Standard estimation: ~4 characters per token
+        Args:
+            text: Text to count
+        
+        Returns:
+            Estimated token count
         """
+        # Simple estimation: ~4 characters per token
         return len(text) // 4
     
     def estimate_cost_with_token_count(
@@ -187,28 +230,35 @@ class ClaudeClient:
         cached_tokens: int = 0
     ) -> Dict[str, Any]:
         """
-        Estimate cost with token counting
+        Estimate cost before API call (for bible_builder)
+        
+        CRITICAL: Returns format that matches what bible_builder expects
+        
+        Args:
+            text: Input text
+            output_tokens: Expected output tokens
+            model: Model name
+            cached_tokens: Expected cached tokens
         
         Returns:
-            Dict with keys: input_tokens, output_tokens, gbp
+            Dict with keys: input_tokens, output_tokens, cached_tokens, gbp
         """
         
         input_tokens = self.count_tokens(text)
         pricing = self.PRICING.get(model, self.PRICING['claude-sonnet-4-5-20250929'])
         
-        input_cost_usd = input_tokens * pricing['input']
-        output_cost_usd = output_tokens * pricing['output']
-        cache_read_cost_usd = cached_tokens * pricing['cache_read'] if cached_tokens > 0 else 0
+        input_cost_usd = (input_tokens / 1_000_000) * pricing['input']
+        output_cost_usd = (output_tokens / 1_000_000) * pricing['output']
+        cache_read_cost_usd = (cached_tokens / 1_000_000) * pricing['cache_read'] if cached_tokens > 0 else 0
         
         total_usd = input_cost_usd + output_cost_usd + cache_read_cost_usd
         total_gbp = total_usd * self.USD_TO_GBP
         
-        # RETURN FORMAT MATCHES bible_builder.py EXPECTATIONS
+        # CRITICAL: Format matches what bible_builder.py line 419 expects
         return {
             'input_tokens': input_tokens,
             'output_tokens': output_tokens,
             'cached_tokens': cached_tokens,
-            'usd': total_usd,
             'gbp': total_gbp
         }
     
@@ -222,11 +272,19 @@ class ClaudeClient:
         """
         Simple fallback cost estimation
         
+        FIXED: Returns IDENTICAL format to estimate_cost_with_token_count
+        
+        Args:
+            input_text: Input text
+            output_tokens: Expected output tokens
+            model: Model name
+            cached_tokens: Expected cached tokens
+        
         Returns:
             Dict with SAME keys as estimate_cost_with_token_count
         """
         
-        # Use same logic as estimate_cost_with_token_count
+        # Use same logic
         return self.estimate_cost_with_token_count(
             text=input_text,
             output_tokens=output_tokens,
@@ -248,4 +306,10 @@ class ClaudeClient:
 
 
 if __name__ == '__main__':
-    print("Claude client loaded successfully!")
+    print("✅ Claude client module loaded successfully!")
+    print("\nKey features:")
+    print("  - create_message() for bible_builder")
+    print("  - Fixed cost estimation methods")
+    print("  - Prompt caching support")
+    print("  - Extended thinking")
+    print("  - Long timeout (20 minutes)")
